@@ -112,18 +112,20 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 |------|------|
 | `/u/<토큰>/qr.png` | QR 이미지 자체(브라우저에서 열면 그림). 저장/캡처해 전달 |
 | `/u/<토큰>/qr` | QR + URL을 크게 보여주는 페이지(화면에 띄워 보여주기) |
-| `/admin?key=<ADMIN_KEY>` | **전체 인원 QR을 한 페이지에** 모아 보는 관리자 화면(인쇄 버튼 포함) |
+| `/admin` | **관리 콘솔**(로그인 후) — 토큰 발급/폐기, 전체 QR, 설치파일, 인쇄 |
 
-- `/admin` 은 환경변수 **`ADMIN_KEY`** 를 설정해야 열립니다(미설정 시 404). 예:
-  `https://<앱>.onrender.com/admin?key=여기에키`
+- `/admin` 접속 → **관리자 비밀번호 로그인**(세션 쿠키). URL에 키를 붙이지 않습니다.
+- 비밀번호 = 환경변수 **`ADMIN_PASSWORD`**(권장, 기억하기 쉬운 값) 또는 **`ADMIN_KEY`**.
+  둘 다 비우면 `/admin` 비활성화(404).
 - 관리자 화면에서 **인쇄** 버튼으로 모든 QR을 종이로 뽑아 현장에 배포할 수 있습니다.
-- ⚠️ `ADMIN_KEY` 는 모든 토큰을 보여주므로 **추측 불가한 긴 값**으로 두고 HTTPS로만 접근하세요.
+- ⚠️ 모든 토큰/설치파일에 접근되므로 **강한 비밀번호**로 두고 HTTPS로만 접속하세요.
+  키가 노출됐다면 `ADMIN_PASSWORD`/`ADMIN_KEY` 를 바꿔 즉시 교체(rotate)하면 됩니다.
 
 ## 사무실 PC 자동연동 — 원클릭 설치 (권장)
 
 처음 쓰는 사람도 **더블클릭 한 번**으로 끝나도록, 관리 콘솔에서 **개인별 설치파일**을 받습니다.
 
-1. 관리자: `/admin?key=<ADMIN_KEY>` 에서 그 사람 카드의 **⬇️ PC 설치파일(.cmd)** 다운로드
+1. 관리자: `/admin` 로그인 후 그 사람 카드의 **⬇️ PC 설치파일(.cmd)** 다운로드
 2. 그 사람: 받은 `SecureGate-Setup.cmd` 를 자기 PC에서 **더블클릭**
    - 통합 에이전트(`SecureGateSync.ps1`) 자동 내려받기 (서버 `/download/agent.ps1`)
    - 토큰·서버 주소가 박힌 설정 자동 생성
@@ -226,8 +228,10 @@ Render 대시보드 → 서비스 → **Environment** 에 아래를 등록:
 | `MAX_FILE_MB` | `30` | 개당 최대 업로드 크기(MB) |
 | `RETENTION_HOURS` | `6` | 이 시간 지난 파일 자동 삭제 |
 | `CLEANUP_INTERVAL_MIN` | `30` | 자동 삭제 점검 주기(분) |
+| `ADMIN_PASSWORD` | (없음) | 관리 콘솔 로그인 비밀번호(권장). 미설정 시 `ADMIN_KEY` 사용 |
+| `ADMIN_KEY` | (없음) | 관리 콘솔 접근/로그인 대체값. 둘 다 비면 `/admin` 비활성화 |
 | `REQUIRE_PIN` | `false` | PIN 게이트 on/off |
-| `SESSION_SECRET` | (랜덤) | PIN 세션 쿠키 서명 키(고정하려면 지정) |
+| `SESSION_SECRET` | (랜덤) | 세션 쿠키 서명 키. **관리자 로그인 유지**하려면 고정값 지정(Render는 자동생성) |
 | `PRINT_QR_ON_START` | `true` | 시작 시 콘솔 ASCII QR 출력 |
 | `PRESET_TOKENS` | (없음) | 고정 토큰 `토큰=이름,토큰=이름`. Render 무료 플랜에서 토큰 유지용 |
 | `DELETE_ON_DOWNLOAD` | `true` | 다운로드한 파일을 서버에서 자동 삭제(소비형) |

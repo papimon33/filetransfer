@@ -104,7 +104,8 @@ ALLOWED_EXT     = set(
 )
 
 REQUIRE_PIN     = _env("REQUIRE_PIN", "false").lower() in ("1", "true", "yes", "on")
-ADMIN_KEY       = _env("ADMIN_KEY", "")   # 설정 시 /admin?key=... 로 전체 QR 대시보드 접근
+ADMIN_KEY       = _env("ADMIN_KEY", "")        # 관리 콘솔 접근용(로그인 비밀번호로도 사용됨)
+ADMIN_PASSWORD  = _env("ADMIN_PASSWORD", "")   # 관리자 로그인 비밀번호(미설정 시 ADMIN_KEY 사용)
 DELETE_ON_DOWNLOAD = _env("DELETE_ON_DOWNLOAD", "true").lower() in ("1", "true", "yes", "on")
 SESSION_SECRET  = _env("SESSION_SECRET") or secrets.token_hex(32)
 PRINT_QR_ON_START = _env("PRINT_QR_ON_START", "true").lower() in ("1", "true", "yes", "on")
@@ -542,31 +543,64 @@ def qr_page(token: str):
 <div class="hint">폰 카메라로 이 QR을 스캔하세요.</div>
 </body></html>""")
 
-def _admin_ok(key: str) -> bool:
-    return bool(ADMIN_KEY) and secrets.compare_digest(key or "", ADMIN_KEY)
+def _admin_enabled() -> bool:
+    return bool(ADMIN_PASSWORD or ADMIN_KEY)
+
+def _admin_secret_ok(secret: str) -> bool:
+    for real in (ADMIN_PASSWORD, ADMIN_KEY):
+        if real and secrets.compare_digest(secret or "", real):
+            return True
+    return False
+
+def _admin_authed(request: Request) -> bool:
+    return bool(request.session.get("admin"))
+
+@app.get("/admin/login", response_class=HTMLResponse)
+def admin_login_page(request: Request):
+    if not _admin_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    if _admin_authed(request):
+        return RedirectResponse(url="/admin", status_code=303)
+    return HTMLResponse(render_login_page())
+
+@app.post("/admin/login", response_class=HTMLResponse)
+def admin_login(request: Request, password: str = Form(...)):
+    if not _admin_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    if _admin_secret_ok(password):
+        request.session["admin"] = True
+        return RedirectResponse(url="/admin", status_code=303)
+    return HTMLResponse(render_login_page("비밀번호가 올바르지 않습니다."), status_code=401)
+
+@app.get("/admin/logout")
+def admin_logout(request: Request):
+    request.session.pop("admin", None)
+    return RedirectResponse(url="/admin/login", status_code=303)
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin(key: str = ""):
-    """관리 콘솔: 토큰 발급/폐기 + 전체 QR/URL. ADMIN_KEY 로 보호."""
-    if not _admin_ok(key):
-        raise HTTPException(status_code=404, detail="Not found")   # 존재 자체를 숨김
-    return HTMLResponse(render_admin_page(key))
+def admin(request: Request):
+    """관리 콘솔: 토큰 발급/폐기 + QR + 설치파일. 로그인(세션) 필요."""
+    if not _admin_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _admin_authed(request):
+        return RedirectResponse(url="/admin/login", status_code=303)
+    return HTMLResponse(render_admin_page())
 
 @app.post("/admin/create")
-def admin_create(key: str = Form(...), name: str = Form(...)):
+def admin_create(request: Request, name: str = Form(...)):
     """관리 콘솔에서 이름 입력으로 새 토큰 발급."""
-    if not _admin_ok(key):
+    if not _admin_authed(request):
         raise HTTPException(status_code=404, detail="Not found")
     issue_token((name or "").strip() or "(이름없음)")
-    return RedirectResponse(url=f"/admin?key={_url_quote(key)}", status_code=303)
+    return RedirectResponse(url="/admin", status_code=303)
 
 @app.post("/admin/revoke")
-def admin_revoke(key: str = Form(...), token: str = Form(...)):
+def admin_revoke(request: Request, token: str = Form(...)):
     """관리 콘솔에서 토큰 폐기(접근 차단)."""
-    if not _admin_ok(key):
+    if not _admin_authed(request):
         raise HTTPException(status_code=404, detail="Not found")
     revoke_token(token)
-    return RedirectResponse(url=f"/admin?key={_url_quote(key)}", status_code=303)
+    return RedirectResponse(url="/admin", status_code=303)
 
 AGENT_PATH = BASE_DIR / "agent" / "SecureGateSync.ps1"
 
@@ -612,9 +646,9 @@ def build_installer_cmd(server: str, token: str) -> str:
     )
 
 @app.get("/admin/installer")
-def admin_installer(key: str = "", token: str = ""):
-    """개인별 설치 .cmd 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출."""
-    if not _admin_ok(key):
+def admin_installer(request: Request, token: str = ""):
+    """개인별 설치 .cmd 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출(로그인 필요)."""
+    if not _admin_authed(request):
         raise HTTPException(status_code=404, detail="Not found")
     if get_token_info(token) is None:
         raise HTTPException(status_code=404, detail="Not found")
@@ -887,12 +921,28 @@ def render_pin_page(token: str, error: str = "") -> str:
 </div></body></html>"""
 
 
-def render_admin_page(key: str) -> str:
+def render_login_page(error: str = "") -> str:
+    err = f'<div class="err" style="margin-top:8px">{_html(error)}</div>' if error else ""
+    return f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>관리자 로그인</title>{CSS}</head><body>
+<h1>🔐 관리자 로그인</h1>
+<div class="sub">SecureGate 업로드 서버 · 관리 콘솔</div>
+<div class="card">
+  <form method="post" action="/admin/login">
+    <input type="password" name="password" autocomplete="current-password" autofocus
+      style="width:100%;padding:12px;font-size:1.05rem;border-radius:10px;border:1px solid #8886;background:transparent;color:inherit"
+      placeholder="관리자 비밀번호">
+    <div class="row" style="margin-top:12px"><button type="submit">로그인</button></div>
+    {err}
+  </form>
+</div></body></html>"""
+
+
+def render_admin_page() -> str:
     data = load_tokens()
     active = [(t, i) for t, i in data.items() if not i.get("revoked")]
     active.sort(key=lambda x: x[1].get("name", ""))
-    k = _html(key)
-    kq = _url_quote(key)
     cards = ""
     for t, i in active:
         url = upload_url(t)
@@ -901,10 +951,10 @@ def render_admin_page(key: str) -> str:
                   f'<div class="qname">{_html(i.get("name",""))}</div>'
                   f'<a class="qurl" href="{url}">{_html(url)}</a>'
                   f'<a class="qurl noprint" style="margin-top:6px;font-weight:600" '
-                  f'href="/admin/installer?key={kq}&token={t}">⬇️ PC 설치파일(.cmd)</a>'
+                  f'href="/admin/installer?token={t}">⬇️ PC 설치파일(.cmd)</a>'
                   f'<form method="post" action="/admin/revoke" class="noprint" style="margin-top:8px" '
                   f'onsubmit="return confirm(\'이 토큰을 폐기할까요? 해당 사용자는 접근이 차단됩니다.\')">'
-                  f'<input type="hidden" name="key" value="{k}"><input type="hidden" name="token" value="{t}">'
+                  f'<input type="hidden" name="token" value="{t}">'
                   f'<button class="revoke" type="submit">폐기</button></form>'
                   f'</div>')
     if not active:
@@ -928,13 +978,15 @@ def render_admin_page(key: str) -> str:
 </style></head><body>
 <div class="row noprint" style="justify-content:space-between; margin-bottom:12px">
   <h1 style="margin:0">🗂️ 관리 콘솔 <span class="hint">({len(active)}명)</span></h1>
-  <button onclick="window.print()">QR 인쇄</button>
+  <div class="row" style="gap:8px">
+    <button onclick="window.print()">QR 인쇄</button>
+    <a href="/admin/logout"><button class="secondary" type="button">로그아웃</button></a>
+  </div>
 </div>
 
 <div class="card noprint">
   <strong>➕ 새 토큰 발급</strong>
   <form method="post" action="/admin/create" class="row" style="margin-top:10px; gap:8px">
-    <input type="hidden" name="key" value="{k}">
     <input type="text" name="name" placeholder="이름 (예: 홍길동)" required style="flex:1; min-width:160px">
     <button type="submit">발급</button>
   </form>

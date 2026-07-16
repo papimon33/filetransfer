@@ -23,7 +23,9 @@ services:
         value: "jpg,jpeg,png,heic,webp"
       - key: REQUIRE_PIN
         value: "false"
-      - key: ADMIN_KEY                 # 전체 QR 대시보드(/admin?key=...) 보호키. 자동 생성(강력)
+      - key: ADMIN_PASSWORD            # 관리 콘솔 로그인 비밀번호 — 기억하기 쉬운 값으로 대시보드에서 직접 입력
+        sync: false
+      - key: ADMIN_KEY                 # (미설정 시 로그인 비밀번호로도 사용) 자동 생성
         generateValue: true
       - key: SESSION_SECRET            # 자동 생성(고정) → PIN 세션이 재배포 후에도 유지
         generateValue: true
