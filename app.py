@@ -568,6 +568,60 @@ def admin_revoke(key: str = Form(...), token: str = Form(...)):
     revoke_token(token)
     return RedirectResponse(url=f"/admin?key={_url_quote(key)}", status_code=303)
 
+AGENT_PATH = BASE_DIR / "agent" / "SecureGateSync.ps1"
+
+@app.get("/download/agent.ps1")
+def download_agent():
+    """통합 에이전트 스크립트 배포(설치파일이 내려받음). 비밀 아님 → 공개."""
+    if not AGENT_PATH.is_file():
+        raise HTTPException(status_code=404, detail="agent not found")
+    return FileResponse(AGENT_PATH, media_type="text/plain", filename="SecureGateSync.ps1")
+
+def build_installer_cmd(server: str, token: str) -> str:
+    """개인별 설치 .cmd 생성. 더블클릭 → 에이전트 내려받기 + 설정 + 작업스케줄러 등록 + 시작.
+    본문은 순수 ASCII, 실제 로직은 base64(-EncodedCommand)로 넣어 인코딩/따옴표 문제를 피한다."""
+    ps = (
+        "$ErrorActionPreference='Stop'\n"
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12\n"
+        f"$server='{server}'\n"
+        f"$token='{token}'\n"
+        "$dir=Join-Path $env:LOCALAPPDATA 'SecureGateSync'\n"
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null\n"
+        "Write-Host '에이전트를 내려받는 중...'\n"
+        "Invoke-WebRequest -Uri ($server+'/download/agent.ps1') -OutFile (Join-Path $dir 'SecureGateSync.ps1') -UseBasicParsing\n"
+        "$cfg = \"@{`r`n  ServerBaseUrl = '$server'`r`n  Token = '$token'`r`n  IntervalSeconds = 3`r`n}\"\n"
+        "[IO.File]::WriteAllText((Join-Path $dir 'SecureGateSync.config.psd1'), $cfg, (New-Object Text.UTF8Encoding($true)))\n"
+        "$psf=Join-Path $dir 'SecureGateSync.ps1'\n"
+        "$act=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"'+$psf+'\"')\n"
+        "$trg=New-ScheduledTaskTrigger -AtLogOn\n"
+        "$prn=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n"
+        "$set=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)\n"
+        "Register-ScheduledTask -TaskName 'SecureGateSync' -Action $act -Trigger $trg -Principal $prn -Settings $set -Force | Out-Null\n"
+        "Start-ScheduledTask -TaskName 'SecureGateSync'\n"
+        "Write-Host ''\n"
+        "Write-Host '설치 완료! 지금부터 자동으로 동작하며, 로그인할 때마다 자동 시작됩니다.' -ForegroundColor Green\n"
+        "Write-Host '이 창은 닫아도 됩니다.'\n"
+    )
+    b64 = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
+    return (
+        "@echo off\r\n"
+        "echo Installing SecureGateSync ...\r\n"
+        f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {b64}\r\n"
+        "echo.\r\n"
+        "pause\r\n"
+    )
+
+@app.get("/admin/installer")
+def admin_installer(key: str = "", token: str = ""):
+    """개인별 설치 .cmd 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출."""
+    if not _admin_ok(key):
+        raise HTTPException(status_code=404, detail="Not found")
+    if get_token_info(token) is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    cmd = build_installer_cmd(base_url(), token)
+    return Response(content=cmd.encode("utf-8"), media_type="application/octet-stream",
+                    headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.cmd"'})
+
 
 # ──────────────────────────────────────────────────────────────
 # HTML 렌더링 (단일 파일 유지 위해 인라인)
@@ -838,6 +892,7 @@ def render_admin_page(key: str) -> str:
     active = [(t, i) for t, i in data.items() if not i.get("revoked")]
     active.sort(key=lambda x: x[1].get("name", ""))
     k = _html(key)
+    kq = _url_quote(key)
     cards = ""
     for t, i in active:
         url = upload_url(t)
@@ -845,6 +900,8 @@ def render_admin_page(key: str) -> str:
                   f'<img src="/u/{t}/qr.png" alt="QR">'
                   f'<div class="qname">{_html(i.get("name",""))}</div>'
                   f'<a class="qurl" href="{url}">{_html(url)}</a>'
+                  f'<a class="qurl noprint" style="margin-top:6px;font-weight:600" '
+                  f'href="/admin/installer?key={kq}&token={t}">⬇️ PC 설치파일(.cmd)</a>'
                   f'<form method="post" action="/admin/revoke" class="noprint" style="margin-top:8px" '
                   f'onsubmit="return confirm(\'이 토큰을 폐기할까요? 해당 사용자는 접근이 차단됩니다.\')">'
                   f'<input type="hidden" name="key" value="{k}"><input type="hidden" name="token" value="{t}">'
@@ -882,6 +939,16 @@ def render_admin_page(key: str) -> str:
     <button type="submit">발급</button>
   </form>
   <div class="hint" style="margin-top:8px">발급하면 아래 목록에 QR과 함께 나타납니다. 잃어버려도 여기서 다시 확인/재발급하면 됩니다.</div>
+</div>
+
+<div class="card noprint" style="border-color:#2d6cdf55">
+  <strong>💻 사무실 PC 자동연동 설치</strong>
+  <div class="hint" style="margin-top:6px">
+    각 카드의 <b>⬇️ PC 설치파일(.cmd)</b> 을 받아 그 사람 PC에서 <b>더블클릭</b>만 하면 끝입니다.
+    (에이전트 자동 설치 + 로그인 시 자동시작 등록 + 즉시 실행) → 이후 폰으로 올린 사진이
+    3초 내 자동으로 SecureGate 전송 목록에 얹힙니다. <b>SecureGate 보내기 클릭만 사람이 합니다.</b>
+    <br>※ 다운로드 시 브라우저/백신 경고가 뜨면 "실행/유지"를 선택하세요(내부 배포 파일).
+  </div>
 </div>
 
 <div class="grid">{cards}</div>

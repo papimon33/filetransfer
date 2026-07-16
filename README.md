@@ -119,6 +119,24 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 - 관리자 화면에서 **인쇄** 버튼으로 모든 QR을 종이로 뽑아 현장에 배포할 수 있습니다.
 - ⚠️ `ADMIN_KEY` 는 모든 토큰을 보여주므로 **추측 불가한 긴 값**으로 두고 HTTPS로만 접근하세요.
 
+## 사무실 PC 자동연동 — 원클릭 설치 (권장)
+
+처음 쓰는 사람도 **더블클릭 한 번**으로 끝나도록, 관리 콘솔에서 **개인별 설치파일**을 받습니다.
+
+1. 관리자: `/admin?key=<ADMIN_KEY>` 에서 그 사람 카드의 **⬇️ PC 설치파일(.cmd)** 다운로드
+2. 그 사람: 받은 `SecureGate-Setup.cmd` 를 자기 PC에서 **더블클릭**
+   - 통합 에이전트(`SecureGateSync.ps1`) 자동 내려받기 (서버 `/download/agent.ps1`)
+   - 토큰·서버 주소가 박힌 설정 자동 생성
+   - **작업 스케줄러에 자동 등록**(로그인 시 자동 시작) + 즉시 실행
+3. 이후: 폰으로 올린 사진이 **3초 내 자동으로** SecureGate 전송 목록에 얹힘
+   → 사람은 SecureGate 창에서 **"보내기"만** 클릭
+
+> 별도 프로그램2 설정/실행이 필요 없습니다. 에이전트가 pull + SecureGate 투입을 통합 수행합니다.
+> (SecureGate.exe 경로 기본값 `C:\HANSSAK\SecureGateEX\SecureGate.exe` — 다르면
+> `%LOCALAPPDATA%\SecureGateSync\SecureGateSync.config.psd1` 의 `SecureGateExe` 만 수정)
+>
+> 다운로드 시 브라우저/백신 경고가 나오면 "실행/유지"(내부 배포 파일). 관리자 권한은 필요 없습니다.
+
 ## 토큰 관리 (CLI)
 
 | 명령 | 설명 |
