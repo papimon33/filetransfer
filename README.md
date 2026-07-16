@@ -126,10 +126,10 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 처음 쓰는 사람도 **더블클릭 한 번**으로 끝나도록, 관리 콘솔에서 **개인별 설치파일**을 받습니다.
 
 1. 관리자: `/admin` 로그인 후 그 사람 카드의 **⬇️ PC 설치파일(.cmd)** 다운로드
-2. 그 사람: 받은 `SecureGate-Setup.cmd` 를 자기 PC에서 **더블클릭**
-   - 통합 에이전트(`SecureGateSync.ps1`) 자동 내려받기 (서버 `/download/agent.ps1`)
-   - 토큰·서버 주소가 박힌 설정 자동 생성
-   - **작업 스케줄러에 자동 등록**(로그인 시 자동 시작) + 즉시 실행
+2. 그 사람: 받은 `SecureGate-Setup.ps1` 을 자기 PC에서 한 번만 실행
+   - 우클릭 → **속성** → **차단 해제** 체크(인터넷 파일 표시 제거) → 확인
+   - 우클릭 → **PowerShell에서 실행** (또는 `powershell -ExecutionPolicy Bypass -File .\SecureGate-Setup.ps1`)
+   - 자기 자신을 `%LOCALAPPDATA%\SecureGateSync\` 로 복사 + **시작프로그램에 자동시작 등록** + 즉시 실행
 3. 이후: 폰으로 올린 사진이 **3초 내 자동으로** SecureGate 전송 목록에 얹힘
    → 사람은 SecureGate 창에서 **"보내기"만** 클릭
 
@@ -137,7 +137,10 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 > (SecureGate.exe 경로 기본값 `C:\HANSSAK\SecureGateEX\SecureGate.exe` — 다르면
 > `%LOCALAPPDATA%\SecureGateSync\SecureGateSync.config.psd1` 의 `SecureGateExe` 만 수정)
 >
-> 다운로드 시 브라우저/백신 경고가 나오면 "실행/유지"(내부 배포 파일). 관리자 권한은 필요 없습니다.
+> **자동시작은 '작업 스케줄러'가 아니라 '시작프로그램 폴더' 바로가기**를 씁니다 — 회사 보안
+> 프로그램이 작업 스케줄러 생성을 막는 환경에서도 동작하도록. base64/난독화도 없는 일반
+> 스크립트라 백신 오탐이 적습니다. 그래도 막히면 IT에 이 파일 허용을 요청하세요.
+> 관리자 권한은 필요 없습니다. 제거: `... -File "%LOCALAPPDATA%\SecureGateSync\SecureGateSync.ps1" -Uninstall`
 
 ## 토큰 관리 (CLI)
 

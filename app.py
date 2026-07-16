@@ -611,50 +611,26 @@ def download_agent():
         raise HTTPException(status_code=404, detail="agent not found")
     return FileResponse(AGENT_PATH, media_type="text/plain", filename="SecureGateSync.ps1")
 
-def build_installer_cmd(server: str, token: str) -> str:
-    """개인별 설치 .cmd 생성. 더블클릭 → 에이전트 내려받기 + 설정 + 작업스케줄러 등록 + 시작.
-    본문은 순수 ASCII, 실제 로직은 base64(-EncodedCommand)로 넣어 인코딩/따옴표 문제를 피한다."""
-    ps = (
-        "$ErrorActionPreference='Stop'\n"
-        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12\n"
-        f"$server='{server}'\n"
-        f"$token='{token}'\n"
-        "$dir=Join-Path $env:LOCALAPPDATA 'SecureGateSync'\n"
-        "New-Item -ItemType Directory -Force -Path $dir | Out-Null\n"
-        "Write-Host '에이전트를 내려받는 중...'\n"
-        "Invoke-WebRequest -Uri ($server+'/download/agent.ps1') -OutFile (Join-Path $dir 'SecureGateSync.ps1') -UseBasicParsing\n"
-        "$cfg = \"@{`r`n  ServerBaseUrl = '$server'`r`n  Token = '$token'`r`n  IntervalSeconds = 3`r`n}\"\n"
-        "[IO.File]::WriteAllText((Join-Path $dir 'SecureGateSync.config.psd1'), $cfg, (New-Object Text.UTF8Encoding($true)))\n"
-        "$psf=Join-Path $dir 'SecureGateSync.ps1'\n"
-        "$act=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"'+$psf+'\"')\n"
-        "$trg=New-ScheduledTaskTrigger -AtLogOn\n"
-        "$prn=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited\n"
-        "$set=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)\n"
-        "Register-ScheduledTask -TaskName 'SecureGateSync' -Action $act -Trigger $trg -Principal $prn -Settings $set -Force | Out-Null\n"
-        "Start-ScheduledTask -TaskName 'SecureGateSync'\n"
-        "Write-Host ''\n"
-        "Write-Host '설치 완료! 지금부터 자동으로 동작하며, 로그인할 때마다 자동 시작됩니다.' -ForegroundColor Green\n"
-        "Write-Host '이 창은 닫아도 됩니다.'\n"
-    )
-    b64 = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
-    return (
-        "@echo off\r\n"
-        "echo Installing SecureGateSync ...\r\n"
-        f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {b64}\r\n"
-        "echo.\r\n"
-        "pause\r\n"
-    )
+def build_installer_ps1(server: str, token: str) -> str:
+    """개인별 설치 .ps1 생성 = 통합 스크립트(agent/SecureGateSync.ps1)에 서버/토큰만 주입.
+    base64/난독화 없이 사람이 읽을 수 있는 일반 스크립트 → 백신/EDR 오탐 최소화."""
+    text = AGENT_PATH.read_text(encoding="utf-8-sig")   # BOM 제거하여 읽기
+    # ★ 첫 번째 occurrence(할당문)만 치환. 아래 가드의 -like '*__SERVER__*' 판정 리터럴은 보존해야 함.
+    text = text.replace("__SERVER__", server, 1).replace("__TOKEN__", token, 1)
+    return text
 
 @app.get("/admin/installer")
 def admin_installer(request: Request, token: str = ""):
-    """개인별 설치 .cmd 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출(로그인 필요)."""
+    """개인별 설치 .ps1 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출(로그인 필요)."""
     if not _admin_authed(request):
         raise HTTPException(status_code=404, detail="Not found")
-    if get_token_info(token) is None:
+    info = get_token_info(token)
+    if info is None:
         raise HTTPException(status_code=404, detail="Not found")
-    cmd = build_installer_cmd(base_url(), token)
-    return Response(content=cmd.encode("utf-8"), media_type="application/octet-stream",
-                    headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.cmd"'})
+    ps = build_installer_ps1(base_url(), token)
+    # PS 5.1 한글 대응: UTF-8 BOM 로 인코딩(utf-8-sig)
+    return Response(content=ps.encode("utf-8-sig"), media_type="text/plain",
+                    headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.ps1"'})
 
 
 # ──────────────────────────────────────────────────────────────
@@ -951,7 +927,7 @@ def render_admin_page() -> str:
                   f'<div class="qname">{_html(i.get("name",""))}</div>'
                   f'<a class="qurl" href="{url}">{_html(url)}</a>'
                   f'<a class="qurl noprint" style="margin-top:6px;font-weight:600" '
-                  f'href="/admin/installer?token={t}">⬇️ PC 설치파일(.cmd)</a>'
+                  f'href="/admin/installer?token={t}">⬇️ PC 설치파일(.ps1)</a>'
                   f'<form method="post" action="/admin/revoke" class="noprint" style="margin-top:8px" '
                   f'onsubmit="return confirm(\'이 토큰을 폐기할까요? 해당 사용자는 접근이 차단됩니다.\')">'
                   f'<input type="hidden" name="token" value="{t}">'
@@ -996,10 +972,18 @@ def render_admin_page() -> str:
 <div class="card noprint" style="border-color:#2d6cdf55">
   <strong>💻 사무실 PC 자동연동 설치</strong>
   <div class="hint" style="margin-top:6px">
-    각 카드의 <b>⬇️ PC 설치파일(.cmd)</b> 을 받아 그 사람 PC에서 <b>더블클릭</b>만 하면 끝입니다.
-    (에이전트 자동 설치 + 로그인 시 자동시작 등록 + 즉시 실행) → 이후 폰으로 올린 사진이
-    3초 내 자동으로 SecureGate 전송 목록에 얹힙니다. <b>SecureGate 보내기 클릭만 사람이 합니다.</b>
-    <br>※ 다운로드 시 브라우저/백신 경고가 뜨면 "실행/유지"를 선택하세요(내부 배포 파일).
+    각 카드의 <b>⬇️ PC 설치파일(.ps1)</b> 을 받아 그 사람 PC에서 아래처럼 <b>한 번만</b> 실행:
+    <ol style="margin:6px 0 0 18px; padding:0">
+      <li>받은 <code>SecureGate-Setup.ps1</code> 우클릭 → <b>속성</b> → 하단 <b>차단 해제</b> 체크 → 확인
+         (인터넷에서 받은 파일 표시 제거)</li>
+      <li>우클릭 → <b>PowerShell에서 실행</b>
+         &nbsp;(또는 명령: <code>powershell -ExecutionPolicy Bypass -File .\SecureGate-Setup.ps1</code>)</li>
+    </ol>
+    → <b>시작프로그램</b>에 자동 등록(로그인 시 자동시작) + 즉시 실행됩니다. 이후 폰으로 올린 사진이
+    3초 내 자동으로 SecureGate 전송 목록에 얹힙니다. <b>보내기 클릭만 사람이 합니다.</b>
+    <br>※ 작업 스케줄러 대신 시작프로그램 폴더를 쓰므로 보안정책에 덜 막힙니다. base64 등 난독화도
+    없습니다. 그래도 막히면 IT에 이 파일 허용을 요청하세요. 제거는
+    <code>... -File "%LOCALAPPDATA%\SecureGateSync\SecureGateSync.ps1" -Uninstall</code>.
   </div>
 </div>
 
