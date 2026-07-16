@@ -1,0 +1,220 @@
+# 프로그램 1 — QR 업로드 서버 (폰 → 외부망 PC)
+
+현장에서 폰으로 찍은 업무 사진을, **사용자별 전용 토큰 URL(QR)** 로 업로드하고
+외부망 PC에서 같은 URL로 **원본 그대로** 내려받는 웹앱입니다. (FastAPI)
+
+---
+
+## ⚠️ 보안 주의 (먼저 읽어 주세요)
+
+- 업무 사진이 **서버를 경유**합니다. **외부 클라우드(Render)에 배포할 경우 조직
+  보안정책 확인이 필요**하며, 가능하면 **사내(외부망) 서버 배포를 권장**합니다.
+- 이 서버는 "폰 → 외부망 PC로 사진 옮기기"까지만 담당합니다. 내부망 반입의 실제
+  보안 통제(SecureGate 승인·백신검사 등)는 **프로그램 2 이후 단계**에서 그대로
+  적용됩니다.
+
+---
+
+## 전체 흐름 속 위치
+
+```
+폰(촬영) ─QR─▶ [프로그램1: 이 서버] 업로드
+                     │
+   외부망 PC에서 같은 토큰 URL 열어 원본 다운로드 → 지정 폴더에 저장
+                     │
+                     ▼   (이 저장 폴더 = 프로그램2 감시 폴더)
+            [프로그램2: 폴더 감시] → SecureGate 전송 대기 목록에 자동 투입
+                     │
+            사용자가 SecureGate에서 "보내기" 직접 클릭 (자동화 안 함)
+```
+
+> **연결 지점:** 외부망 PC에서 **다운로드해 저장하는 폴더**가 곧 프로그램 2의
+> **감시 폴더**입니다. (아래 "두 프로그램 연결" 참고)
+
+---
+
+## 핵심 기능
+
+- **사용자별 격리**: 각자 `/u/<token>` 전용 URL. 저장도 `uploads/<token>/` 로 물리 분리.
+  자기 파일만 보이고 다운로드 가능. 다른 토큰 폴더 접근은 서버가 차단.
+- **원본 그대로**: ZIP으로 묶지 않고 **파일 단위 원본** 다운로드. "전체 순차 다운로드"
+  버튼으로 여러 장을 차례로 받는 편의 기능 제공(서버 압축 없음).
+- **한글 파일명 유지**: `Content-Disposition: filename*` 로 한글 파일명 보존.
+- **보안**: 추측 불가 랜덤 토큰, 확장자 화이트리스트(jpg/jpeg/png/heic/webp),
+  개당 용량 제한(기본 30MB), Path Traversal 차단.
+- **자동 삭제**: 업로드 후 N시간(기본 6h) 경과 파일 백그라운드 자동 삭제.
+- **(선택) PIN 게이트**: 환경변수로 켜면 PIN 입력 후 접근(서명된 세션 쿠키 사용,
+  localStorage 미사용). 기본은 토큰만.
+- **스트리밍 다운로드**: `FileResponse` 로 메모리에 통째로 올리지 않음.
+
+---
+
+## 로컬 실행
+
+### 1) 설치
+```bash
+cd qr-upload-server
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# (macOS/Linux) source .venv/bin/activate
+pip install -r requirements.txt
+```
+> **사내 프록시(자체 서명 인증서) 환경에서 pip SSL 오류가 나면:**
+> ```bash
+> pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org
+> ```
+
+### 2) 토큰 발급 (관리자)
+```bash
+python app.py issue --name "홍길동"
+# → 전용 URL + ASCII QR 출력, qrcodes/<token>.png 저장
+```
+
+### 3) 서버 실행
+```bash
+python app.py run
+# 또는
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+실행하면 콘솔에 **활성 토큰별 URL과 QR**이 출력됩니다.
+
+> **폰에서 QR을 찍으려면** 폰과 서버 PC가 같은 망(LAN)이어야 하고, QR이 가리키는
+> 주소가 접근 가능해야 합니다. `BASE_URL` 미설정 시 서버가 LAN IP를 자동 감지해
+> `http://<LAN IP>:8000` 로 QR을 만듭니다. 고정하려면 `BASE_URL` 환경변수를 지정하세요.
+
+---
+
+## 토큰 관리 (CLI)
+
+| 명령 | 설명 |
+|------|------|
+| `python app.py issue --name "이름" [--pin 1234]` | 새 토큰 발급 → URL·QR 출력 |
+| `python app.py list` | 토큰 목록(활성/폐기, PIN 여부, URL) |
+| `python app.py revoke <token>` | 토큰 폐기(즉시 접근 차단) |
+| `python app.py qr <token>` | 특정 토큰 URL/QR 다시 출력 |
+
+토큰은 `tokens.json` 에 보관됩니다(폐기해도 기록 유지, `revoked=true` 로 표시).
+
+---
+
+## 사용 흐름
+
+1. **관리자**: `issue` 로 사용자별 토큰 발급 → 각자에게 QR/URL 전달.
+2. **현장(폰)**: QR 스캔 → 업로드 페이지에서 사진 여러 장 선택/촬영 → 업로드.
+   업로드 후 "N장 업로드 완료" 피드백 표시.
+3. **외부망 PC**: 같은 토큰 URL 열기 → "내 파일" 목록에서 각 파일을 원본 다운로드
+   (또는 "전체 순차 다운로드"). **지정 폴더에 저장** → 이후 프로그램 2가 처리.
+
+---
+
+## Render 배포 (단계별)
+
+### 0) 먼저 알아둘 점 — 무료 vs 유료
+Render 무료 플랜은 **파일시스템이 임시**입니다(재배포·재시작·15분 유휴 후 슬립 시 초기화).
+그래서 두 가지를 고려해야 합니다.
+
+- **토큰 유지** → 토큰을 서버 파일이 아니라 **환경변수 `PRESET_TOKENS`** 로 고정합니다(아래 3단계). 무료에서도 재시작 후 토큰이 유지됩니다.
+- **업로드 파일 유지** → 무료는 슬립 시 파일이 사라질 수 있습니다. "현장 업로드 → 사무실에서 나중에 다운로드"처럼 **시간 간격이 있으면**, 그 사이 서버가 슬립하면 파일이 날아갈 수 있습니다.
+  - **테스트/즉시 다운로드**용이면 무료로 충분.
+  - **실사용(간격 있음)** 이면 **유료 Starter($7/월) + 영구 Disk** 를 권장합니다(`render.yaml` 의 `disk:` 주석 해제, `UPLOAD_DIR/TOKENS_FILE/QR_DIR` 를 `/data` 아래로). 슬립도 없고 파일도 보존됩니다.
+
+### 1) 코드를 GitHub에 올리기
+이 리포(또는 `qr-upload-server` 폴더 포함 리포)를 GitHub에 push 합니다.
+
+### 2) Render에서 웹 서비스 생성
+[dashboard.render.com](https://dashboard.render.com) → **New +** →
+- **Blueprint** 선택 후 이 리포를 고르면 `render.yaml` 대로 자동 구성됩니다. (권장)
+- 또는 **Web Service** 를 수동 생성:
+  - **Root Directory**: `qr-upload-server`
+  - **Build Command**: `pip install -r requirements.txt`
+  - **Start Command**: `uvicorn app:app --host 0.0.0.0 --port $PORT`
+
+### 3) 토큰을 로컬에서 만들어 환경변수에 넣기
+로컬에서 사용자별 토큰을 발급합니다(서버가 아니라 내 PC에서):
+```bash
+python app.py issue --name "홍길동"    # 출력된 '토큰' 문자열을 복사
+python app.py issue --name "김철수"
+```
+Render 대시보드 → 서비스 → **Environment** 에 아래를 등록:
+| Key | Value(예시) |
+|-----|-------------|
+| `PRESET_TOKENS` | `AbC..홍길동토큰=홍길동,XyZ..김철수토큰=김철수` |
+| `BASE_URL` | (4단계에서 나온 도메인) `https://qr-upload-server.onrender.com` |
+
+> `PRESET_TOKENS` 형식은 `토큰=이름` 을 쉼표로 이어 붙입니다. 이렇게 하면 무료 플랜에서
+> 재배포·슬립 후에도 **같은 URL/QR** 이 계속 유효합니다.
+
+### 4) 배포 & BASE_URL 채우기
+첫 배포가 끝나면 `https://<앱이름>.onrender.com` 도메인이 생깁니다.
+이 값을 `BASE_URL` 에 넣고 저장하면 재배포됩니다. (HTTPS는 Render가 자동 처리)
+
+### 5) QR 확인 → 배포
+- Render **Logs** 탭에 시작 시 각 토큰의 URL/QR(ASCII)이 찍힙니다.
+- 또는 로컬에서 `BASE_URL=https://<앱>.onrender.com python app.py qr <토큰>` 으로 QR PNG를 뽑아
+  현장 작업자에게 전달합니다.
+- 현장 폰으로 QR 스캔 → 업로드 → 사무실 외부망 PC에서 같은 URL 열어 다운로드.
+
+> **정리:** 무료로 시작해도 되지만, "현장에서 올리고 사무실에서 나중에 받는" 실제 운영이라면
+> 파일 보존을 위해 **유료 + Disk** 를 권장합니다. 토큰은 `PRESET_TOKENS` 로 무료에서도 유지됩니다.
+
+---
+
+## 환경변수
+
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `BASE_URL` | (LAN IP 자동) | QR/URL이 가리킬 공개 주소. Render면 `https://...onrender.com` |
+| `HOST` | `0.0.0.0` | 바인딩 호스트 |
+| `PORT` | `8000` | 포트 (Render는 자동 주입) |
+| `UPLOAD_DIR` | `./uploads` | 업로드 저장 루트 |
+| `TOKENS_FILE` | `./tokens.json` | 토큰 저장소 |
+| `QR_DIR` | `./qrcodes` | QR PNG 저장 폴더 |
+| `ALLOWED_EXT` | `jpg,jpeg,png,heic,webp` | 허용 확장자 |
+| `MAX_FILE_MB` | `30` | 개당 최대 업로드 크기(MB) |
+| `RETENTION_HOURS` | `6` | 이 시간 지난 파일 자동 삭제 |
+| `CLEANUP_INTERVAL_MIN` | `30` | 자동 삭제 점검 주기(분) |
+| `REQUIRE_PIN` | `false` | PIN 게이트 on/off |
+| `SESSION_SECRET` | (랜덤) | PIN 세션 쿠키 서명 키(고정하려면 지정) |
+| `PRINT_QR_ON_START` | `true` | 시작 시 콘솔 ASCII QR 출력 |
+| `PRESET_TOKENS` | (없음) | 고정 토큰 `토큰=이름,토큰=이름`. Render 무료 플랜에서 토큰 유지용 |
+
+`.env.example` 참고. (로컬은 `python-dotenv` 미사용 → 셸에서 직접 export 하거나 실행 앞에 지정)
+
+---
+
+## 두 프로그램 연결 (프로그램 2와 폴더 공유)
+
+외부망 PC에서 **내 토큰 파일을 다운로드해 저장하는 폴더**를 프로그램 2의 감시 폴더로
+맞춥니다. 예를 들어 `C:\SecureGateWatch` 에 저장한다면 프로그램 2 설정을 이렇게:
+
+`../SecureGateAutoList.config.psd1`
+```powershell
+WatchFolder = 'C:\SecureGateWatch'   # ← 여기에 QR서버에서 받은 사진을 저장
+```
+
+- 사용자별로 파일이 격리되므로 **내 파일만 내 자동전송에 흘러가고** 다른 사람 것과 안 섞입니다.
+- **직원마다 각자 PC에서** 쓰려면, 각자 자기 토큰 URL에서 받은 파일을 각자의 감시 폴더에
+  저장하고, 프로그램 2의 `WatchFolder` 만 그 폴더로 바꾸면 됩니다.
+- 실제 SecureGate에 붙이기 전 프로그램 2를 **`-DryRun`** 으로 먼저 돌려보길 권합니다.
+
+전체 시스템 개요는 상위 폴더의 **`../README-SYSTEM.md`** 참고.
+
+---
+
+## 보안 세부
+
+- **토큰**: `secrets.token_urlsafe(24)` (추측 불가). 토큰 형식(영숫자/`-`/`_`)이 아니면 즉시 거부.
+- **격리/차단**: 다운로드 시 요청 경로를 해당 토큰 폴더 기준으로 resolve 후 **폴더 밖이면 404**.
+  파일명은 basename만 취하고 제어문자 제거(유니코드/한글은 보존).
+- **확장자/용량**: 화이트리스트 + 청크 스트리밍으로 크기 초과 시 중단·삭제.
+- **토큰 노출 방지**: 루트 `/` 는 토큰 목록을 노출하지 않음. 없는/폐기된 토큰은 404.
+- **PIN(선택)**: 통과 상태는 서명된 세션 쿠키에만 저장(브라우저 localStorage 미사용).
+
+## 검증(개발용)
+
+```bash
+pip install httpx   # (테스트에만 필요, 사내 프록시면 --trusted-host 추가)
+python _test_app.py
+```
+격리·traversal·확장자·용량·한글파일명·PIN 등 24개 항목을 in-process로 검증합니다.

@@ -1,0 +1,13 @@
+# 런타임 생성물 (절대 커밋 금지 — 업무 사진/토큰 포함)
+uploads/
+qrcodes/
+tokens.json
+tokens.tmp
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
