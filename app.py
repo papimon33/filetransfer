@@ -105,6 +105,7 @@ ALLOWED_EXT     = set(
 
 REQUIRE_PIN     = _env("REQUIRE_PIN", "false").lower() in ("1", "true", "yes", "on")
 ADMIN_KEY       = _env("ADMIN_KEY", "")   # 설정 시 /admin?key=... 로 전체 QR 대시보드 접근
+DELETE_ON_DOWNLOAD = _env("DELETE_ON_DOWNLOAD", "true").lower() in ("1", "true", "yes", "on")
 SESSION_SECRET  = _env("SESSION_SECRET") or secrets.token_hex(32)
 PRINT_QR_ON_START = _env("PRINT_QR_ON_START", "true").lower() in ("1", "true", "yes", "on")
 
@@ -403,12 +404,35 @@ def root():
 def healthz():
     return "ok"
 
+def is_mobile(request: Request) -> bool:
+    ua = request.headers.get("user-agent", "").lower()
+    return any(k in ua for k in ("iphone", "android", "ipad", "ipod", "mobile", "windows phone"))
+
 @app.get("/u/{token}", response_class=HTMLResponse)
 def page(token: str, request: Request):
+    """QR(폰) → 모바일 업로드 페이지 / PC → 다운로드 페이지 (User-Agent 자동 분기)."""
     info = require_token(token)
     if not pin_ok(token, info, request):
         return HTMLResponse(render_pin_page(token))
-    return HTMLResponse(render_main_page(token, info, request))
+    if is_mobile(request):
+        return HTMLResponse(render_mobile_upload_page(token, info))
+    return HTMLResponse(render_desktop_download_page(token, info))
+
+@app.get("/u/{token}/m", response_class=HTMLResponse)
+def page_mobile(token: str, request: Request):
+    """모바일 업로드 페이지(수동 강제)."""
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        return HTMLResponse(render_pin_page(token))
+    return HTMLResponse(render_mobile_upload_page(token, info))
+
+@app.get("/u/{token}/d", response_class=HTMLResponse)
+def page_desktop(token: str, request: Request):
+    """PC 다운로드 페이지(수동 강제)."""
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        return HTMLResponse(render_pin_page(token))
+    return HTMLResponse(render_desktop_download_page(token, info))
 
 @app.post("/u/{token}/pin", response_class=HTMLResponse)
 def submit_pin(token: str, request: Request, pin: str = Form(...)):
@@ -478,6 +502,21 @@ def download(token: str, filename: str, request: Request):
     # FileResponse: 스트리밍 + 한글 파일명(Content-Disposition filename* 자동 처리)
     return FileResponse(path, media_type=media, filename=path.name)
 
+@app.delete("/u/{token}/file/{filename}")
+def delete_file(token: str, filename: str, request: Request):
+    """다운로드 완료 후 클라이언트가 호출 → 해당 파일 서버에서 삭제(소비형)."""
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        raise HTTPException(status_code=401, detail="PIN 필요")
+    path = resolve_in_userdir(token, filename)
+    if path is None:
+        return JSONResponse({"deleted": False}, status_code=404)
+    try:
+        path.unlink()
+        return {"deleted": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/u/{token}/qr.png")
 def qr_image(token: str):
     """이 토큰 업로드 URL의 QR을 PNG 이미지로 반환(브라우저에서 바로 열림)."""
@@ -524,101 +563,237 @@ def _fmt_size(n: int) -> str:
 
 CSS = """
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light dark; --blue:#2d6cdf; --bg:#ffffff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141414; } }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "Segoe UI", Roboto, "Malgun Gothic", sans-serif;
-         margin: 0; padding: 16px; max-width: 720px; margin-inline: auto; }
+         margin: 0; padding: 16px; max-width: 760px; margin-inline: auto; }
   h1 { font-size: 1.25rem; margin: 0 0 4px; }
   .sub { color: #888; font-size: .85rem; margin-bottom: 16px; }
   .card { border: 1px solid #8883; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-  input[type=file] { width: 100%; padding: 10px 0; }
   button { font-size: 1rem; padding: 12px 16px; border-radius: 10px; border: 0;
-           background: #2d6cdf; color: #fff; cursor: pointer; }
+           background: var(--blue); color: #fff; cursor: pointer; }
   button.secondary { background: #6b7280; }
+  button.ghost { background: transparent; color: var(--blue); border: 1px solid #8886; }
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  ul.files { list-style: none; padding: 0; margin: 8px 0 0; }
-  ul.files li { display: flex; justify-content: space-between; gap: 8px; align-items: center;
-                padding: 10px 0; border-bottom: 1px solid #8882; }
-  ul.files a { text-decoration: none; color: #2d6cdf; word-break: break-all; }
+  a { color: var(--blue); }
   .meta { color: #999; font-size: .8rem; white-space: nowrap; }
-  #msg { margin-top: 10px; font-size: .95rem; }
-  .ok { color: #16a34a; } .err { color: #dc2626; }
   .hint { color:#999; font-size:.8rem; }
+  .ok { color: #16a34a; } .err { color: #dc2626; }
+  #msg { margin-top: 10px; font-size: .95rem; }
+
+  /* 파일 목록 (다운로드 페이지) */
+  ul.files { list-style: none; padding: 0; margin: 8px 0 0; }
+  ul.files li { display: flex; justify-content: space-between; gap: 10px; align-items: center;
+                padding: 12px 0; border-bottom: 1px solid #8882; }
+  ul.files .fname { word-break: break-all; }
+
+  /* 모바일 업로드 */
+  .bigbtn { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;
+            flex:1; min-width:130px; padding:22px 12px; font-size:1.05rem; border-radius:16px;
+            border:2px dashed #8886; background:#8881; color:inherit; cursor:pointer; }
+  .bigbtn .ico { font-size:2rem; }
+  .thumbs { display:grid; grid-template-columns:repeat(auto-fill,minmax(84px,1fr)); gap:8px; margin-top:12px; }
+  .thumbs .t { aspect-ratio:1; border-radius:10px; overflow:hidden; background:#8882; }
+  .thumbs .t img { width:100%; height:100%; object-fit:cover; }
+  .sticky { position:sticky; bottom:0; padding:12px 0; background:linear-gradient(to top, var(--bg) 72%, transparent); }
+  .upbtn { width:100%; font-size:1.15rem; padding:16px; border-radius:14px; }
+
+  /* 모달 */
+  .modal { position:fixed; inset:0; background:#0009; display:none; align-items:center;
+           justify-content:center; padding:16px; z-index:50; }
+  .modal.open { display:flex; }
+  .modal .box { background:var(--bg); color:inherit; border-radius:16px; padding:20px;
+                max-width:360px; text-align:center; }
 </style>
 """
 
-def render_main_page(token: str, info: dict, request: Request) -> str:
+def render_mobile_upload_page(token: str, info: dict) -> str:
+    """모바일 전용 업로드 페이지 — 촬영/앨범 선택, 썸네일 미리보기, 큰 업로드 버튼."""
+    name = _html(info.get("name", ""))
+    return f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>사진 올리기 · {name}</title>{CSS}</head><body>
+<h1>📷 사진 올리기</h1>
+<div class="sub">{name} 님 · 찍거나 골라서 올리면 끝!</div>
+
+<div class="card">
+  <div class="row" style="gap:12px">
+    <button class="bigbtn" id="btnCam" type="button"><span class="ico">📷</span>사진 촬영</button>
+    <button class="bigbtn" id="btnGal" type="button"><span class="ico">🖼️</span>앨범에서 선택</button>
+  </div>
+  <input id="cam" type="file" accept="image/*" capture="environment" multiple hidden>
+  <input id="gal" type="file" accept="image/*" multiple hidden>
+  <div class="thumbs" id="thumbs"></div>
+  <div id="msg"></div>
+</div>
+
+<div class="sticky">
+  <button class="upbtn" id="up" type="button" disabled>업로드 (0장)</button>
+</div>
+<div style="text-align:center"><a href="/u/{token}/d" class="hint">PC에서 다운로드하기 →</a></div>
+
+<script>
+const token = {json_str(token)};
+let picked = [];
+const $ = s => document.querySelector(s);
+const thumbs = $('#thumbs'), up = $('#up'), msg = $('#msg');
+
+function refresh() {{
+  thumbs.innerHTML = '';
+  for (const f of picked) {{
+    const d = document.createElement('div'); d.className = 't';
+    const img = document.createElement('img'); img.src = URL.createObjectURL(f);
+    d.appendChild(img); thumbs.appendChild(d);
+  }}
+  up.disabled = picked.length === 0;
+  up.textContent = '업로드 (' + picked.length + '장)';
+}}
+function addFiles(list) {{ for (const f of list) picked.push(f); refresh(); }}
+$('#btnCam').onclick = () => $('#cam').click();
+$('#btnGal').onclick = () => $('#gal').click();
+$('#cam').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
+$('#gal').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
+
+up.onclick = async () => {{
+  if (!picked.length) return;
+  const fd = new FormData();
+  for (const f of picked) fd.append('files', f);
+  up.disabled = true; msg.innerHTML = '<span class="hint">업로드 중...</span>';
+  try {{
+    const r = await fetch('/u/' + token + '/upload', {{ method: 'POST', body: fd }});
+    const j = await r.json();
+    let h = '<span class="ok">✅ ' + j.uploaded + '장 업로드 완료!</span>';
+    if (j.errors && j.errors.length) h += '<br><span class="err">실패 ' + j.errors.length + '건: ' + j.errors.join(', ') + '</span>';
+    msg.innerHTML = h;
+    picked = []; refresh();
+  }} catch (err) {{
+    msg.innerHTML = '<span class="err">업로드 실패: ' + err + '</span>';
+  }} finally {{ up.disabled = picked.length === 0; }}
+}};
+</script>
+</body></html>"""
+
+
+def render_desktop_download_page(token: str, info: dict) -> str:
+    """PC 전용 다운로드 페이지 — 폴더 연결(자동저장), QR 모달, 다운로드 시 서버 삭제."""
     files = list_user_files(token)
     rows = ""
     for f in files:
         dt = datetime.fromtimestamp(f["mtime"]).strftime("%m-%d %H:%M")
         url = f"/u/{token}/file/{_url_quote(f['name'])}"
-        rows += (f'<li><a class="dl" href="{url}" download>{_html(f["name"])}</a>'
-                 f'<span class="meta">{_fmt_size(f["size"])} · {dt}</span></li>')
+        rows += (f'<li class="filerow" data-url="{url}" data-name="{_html(f["name"])}">'
+                 f'<span class="fname">{_html(f["name"])}</span>'
+                 f'<span class="row" style="gap:10px">'
+                 f'<span class="meta">{_fmt_size(f["size"])} · {dt}</span>'
+                 f'<button class="one ghost" type="button">다운로드</button></span></li>')
     if not rows:
         rows = '<li class="hint">아직 업로드된 파일이 없습니다.</li>'
     name = _html(info.get("name", ""))
+    delflag = "true" if DELETE_ON_DOWNLOAD else "false"
+    qr_url = _html(upload_url(token))
     return f"""<!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>사진 업로드 · {name}</title>{CSS}</head><body>
-<h1>📷 사진 업로드</h1>
-<div class="sub">{name} 전용 공간 · 이 화면의 파일은 본인만 볼 수 있습니다.</div>
+<title>다운로드 · {name}</title>{CSS}</head><body>
+<h1>📥 파일 다운로드</h1>
+<div class="sub">{name} 전용 공간 · 본인 파일만 표시됩니다.</div>
 
 <div class="card">
-  <form id="f">
-    <input id="file" type="file" name="files" accept="image/*" capture="environment" multiple>
-    <div class="row" style="margin-top:10px">
-      <button type="submit" id="btn">업로드</button>
-      <span class="hint">여러 장 선택 가능 · 카메라 촬영 첨부 지원</span>
+  <div class="row" style="justify-content:space-between">
+    <div class="row" style="gap:8px">
+      <button id="connect" class="ghost" type="button">📁 SecureGate 폴더 연결</button>
+      <label class="hint" id="autoWrap" style="display:none"><input type="checkbox" id="auto" checked> 폴더로 자동 저장</label>
     </div>
-  </form>
-  <div id="msg"></div>
+    <div class="row" style="gap:8px">
+      <button id="qrbtn" class="ghost" type="button">📱 모바일 QR</button>
+      <button id="dlall" class="secondary" type="button">전체 다운로드</button>
+    </div>
+  </div>
+  <div class="hint" id="folderStatus" style="margin-top:8px">폴더 미연결 — 다운로드는 브라우저 기본 폴더로 저장됩니다.</div>
 </div>
 
 <div class="card">
   <div class="row" style="justify-content:space-between">
-    <strong>내 파일 ({len(files)})</strong>
-    <button class="secondary" id="dlall" type="button">전체 순차 다운로드</button>
+    <strong>내 파일 (<span id="cnt">{len(files)}</span>)</strong>
+    <span class="hint">다운로드하면 서버에서 자동 삭제됩니다.</span>
   </div>
   <ul class="files" id="list">{rows}</ul>
-  <div class="hint" style="margin-top:8px">※ PC에서 각 파일을 원본 그대로 저장하세요. 저장 폴더가 곧 SecureGate 감시 폴더입니다.</div>
+</div>
+
+<div class="modal" id="qrmodal">
+  <div class="box">
+    <h1 style="font-size:1.1rem">📱 모바일 업로드 QR</h1>
+    <div class="sub">{name} · 폰으로 스캔하세요</div>
+    <img src="/u/{token}/qr.png" alt="QR" style="width:260px;max-width:70vw;height:auto">
+    <div style="margin-top:8px;font-size:.8rem"><a href="{qr_url}">{qr_url}</a></div>
+    <div style="margin-top:12px"><button id="qrclose" type="button">닫기</button></div>
+  </div>
 </div>
 
 <script>
 const token = {json_str(token)};
-const f = document.getElementById('f');
-const btn = document.getElementById('btn');
-const msg = document.getElementById('msg');
+const DELETE_ON_DL = {delflag};
+const $ = s => document.querySelector(s);
+let dirHandle = null;
+const supportsFS = 'showDirectoryPicker' in window;
 
-f.addEventListener('submit', async (e) => {{
-  e.preventDefault();
-  const input = document.getElementById('file');
-  if (!input.files.length) {{ msg.innerHTML = '<span class="err">파일을 선택하세요.</span>'; return; }}
-  const fd = new FormData();
-  for (const file of input.files) fd.append('files', file);
-  btn.disabled = true; msg.textContent = '업로드 중...';
+if (!supportsFS) {{
+  $('#connect').style.display = 'none';
+  $('#folderStatus').textContent = '이 브라우저는 폴더 자동저장을 지원하지 않습니다. Chrome/Edge 권장 — 또는 브라우저 기본 다운로드 폴더를 SecureGate 감시 폴더로 설정하세요.';
+}}
+
+$('#connect').onclick = async () => {{
   try {{
-    const r = await fetch(`/u/${{token}}/upload`, {{ method: 'POST', body: fd }});
-    const j = await r.json();
-    let html = `<span class="ok">${{j.uploaded}}장 업로드 완료</span>`;
-    if (j.errors && j.errors.length) html += `<br><span class="err">실패 ${{j.errors.length}}건: ${{j.errors.join(', ')}}</span>`;
-    msg.innerHTML = html;
-    setTimeout(() => location.reload(), 1200);
-  }} catch (err) {{
-    msg.innerHTML = '<span class="err">업로드 실패: ' + err + '</span>';
-  }} finally {{ btn.disabled = false; }}
-}});
+    dirHandle = await window.showDirectoryPicker({{ mode: 'readwrite' }});
+    $('#folderStatus').innerHTML = '✅ 연결됨: <b>' + dirHandle.name + '</b> — 다운로드가 이 폴더로 바로 저장됩니다.';
+    $('#autoWrap').style.display = 'inline';
+  }} catch (e) {{ /* 사용자가 취소 */ }}
+}};
 
-document.getElementById('dlall').addEventListener('click', async () => {{
-  const links = [...document.querySelectorAll('a.dl')];
-  for (const a of links) {{
-    const tmp = document.createElement('a');
-    tmp.href = a.href; tmp.download = '';
-    document.body.appendChild(tmp); tmp.click(); tmp.remove();
-    await new Promise(res => setTimeout(res, 900));  // 브라우저 다중 다운로드 차단 완화
+async function saveBlob(blob, name) {{
+  if (dirHandle && $('#auto') && $('#auto').checked) {{
+    const fh = await dirHandle.getFileHandle(name, {{ create: true }});
+    const w = await fh.createWritable();
+    await w.write(blob); await w.close();
+  }} else {{
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = u; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 4000);
   }}
+}}
+
+async function downloadRow(li) {{
+  const url = li.dataset.url, name = li.dataset.name;
+  const btn = li.querySelector('.one'); if (btn) btn.disabled = true;
+  try {{
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    await saveBlob(blob, name);
+    if (DELETE_ON_DL) {{ try {{ await fetch(url, {{ method: 'DELETE' }}); }} catch (e) {{}} }}
+    li.remove(); updateCount();
+  }} catch (e) {{
+    if (btn) btn.disabled = false;
+    alert('다운로드 실패: ' + name + '\\n' + e);
+  }}
+}}
+function updateCount() {{ $('#cnt').textContent = document.querySelectorAll('.filerow').length; }}
+
+document.addEventListener('click', e => {{
+  if (e.target.classList.contains('one')) downloadRow(e.target.closest('.filerow'));
 }});
+$('#dlall').onclick = async () => {{
+  for (const li of [...document.querySelectorAll('.filerow')]) {{
+    await downloadRow(li);
+    await new Promise(r => setTimeout(r, 250));
+  }}
+}};
+
+$('#qrbtn').onclick = () => $('#qrmodal').classList.add('open');
+$('#qrclose').onclick = () => $('#qrmodal').classList.remove('open');
+$('#qrmodal').onclick = e => {{ if (e.target.id === 'qrmodal') $('#qrmodal').classList.remove('open'); }};
 </script>
 </body></html>"""
 

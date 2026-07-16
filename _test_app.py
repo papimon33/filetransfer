@@ -29,10 +29,16 @@ with TestClient(A.app) as c:
     check("없는 토큰 404", c.get("/u/nonexistent-token").status_code == 404)
     check("토큰형식 위반 404", c.get("/u/..%2f..").status_code == 404)
 
-    # 2) 정상 페이지
+    # 2) 정상 페이지 (기본 UA=desktop → 다운로드 페이지 / 모바일 UA → 업로드 페이지)
     r = c.get(f"/u/{tA}")
     check("A 페이지 200", r.status_code == 200)
-    check("A 페이지에 업로드폼", "사진 업로드" in r.text)
+    check("데스크톱→다운로드페이지", "파일 다운로드" in r.text)
+    rm = c.get(f"/u/{tA}", headers={"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"})
+    check("모바일→업로드페이지", "사진 올리기" in rm.text)
+    check("/m 강제 업로드페이지", "사진 올리기" in c.get(f"/u/{tA}/m").text)
+    check("/d 강제 다운로드페이지", "파일 다운로드" in c.get(f"/u/{tA}/d").text)
+    check("업로드페이지 촬영/앨범 버튼", ("사진 촬영" in rm.text and "앨범에서 선택" in rm.text))
+    check("다운로드페이지 QR모달", "모바일 QR" in r.text and "qrmodal" in r.text)
 
     # 3) 업로드 (jpg 2장 + 한글파일명 + 금지확장자 txt)
     files = [
@@ -81,6 +87,16 @@ with TestClient(A.app) as c:
     # 10) 저장 구조 물리 격리 확인
     ua = os.path.join(os.environ["UPLOAD_DIR"], tA)
     check("uploads/<A토큰>/ 폴더 분리", os.path.isdir(ua) and len(os.listdir(ua)) == 2)
+
+    # 11) 다운로드 후 삭제(소비형) + traversal
+    before = len(c.get(f"/u/{tA}/list").json()["files"])
+    rdel = c.delete(f"/u/{tA}/file/현장사진.jpg")
+    check("파일 삭제 200", rdel.status_code == 200 and rdel.json().get("deleted") is True)
+    after = [f["name"] for f in c.get(f"/u/{tA}/list").json()["files"]]
+    check("삭제 후 목록 감소", len(after) == before - 1 and "현장사진.jpg" not in after)
+    check("없는 파일 삭제 404", c.delete(f"/u/{tA}/file/현장사진.jpg").status_code == 404)
+    check("삭제 traversal 차단", c.delete(f"/u/{tA}/file/..%2f..%2ftokens.json").status_code == 404)
+    check("삭제 후 물리 파일 1개", len(os.listdir(ua)) == 1)
 
 # PIN 모드 별도 검증
 os.environ["REQUIRE_PIN"] = "true"
