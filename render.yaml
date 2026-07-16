@@ -27,15 +27,17 @@ services:
         generateValue: true
       - key: SESSION_SECRET            # 자동 생성(고정) → PIN 세션이 재배포 후에도 유지
         generateValue: true
+      # 기본: 디스크 없이(무료 플랜) 프로젝트 폴더 아래에 저장 → 쓰기 가능.
+      # 파일시스템은 임시(재배포/슬립 시 초기화)이지만, 토큰은 PRESET_TOKENS 로 유지됨.
       - key: UPLOAD_DIR
-        value: /data/uploads
+        value: uploads
       - key: TOKENS_FILE
-        value: /data/tokens.json
+        value: tokens.json
       - key: QR_DIR
-        value: /data/qrcodes
-    # ↓ 영구 저장을 원하면(유료) 주석 해제. 없으면 파일시스템은 임시(재배포 시 초기화)입니다.
-    #   단, 어차피 RETENTION_HOURS 후 자동 삭제되므로 사진 자체는 임시여도 무방하며,
-    #   disk가 없으면 재배포 때 tokens.json 이 사라져 토큰을 다시 발급해야 합니다.
+        value: qrcodes
+    # ↓ 영구 저장(유료 Disk)을 원하면 아래 disk 주석을 풀고,
+    #   위 UPLOAD_DIR/TOKENS_FILE/QR_DIR 값을 /data/uploads · /data/tokens.json · /data/qrcodes 로 함께 바꾸세요.
+    #   (디스크 없이 /data 를 지정하면 부팅 크래시가 납니다.)
     # disk:
     #   name: data
     #   mountPath: /data

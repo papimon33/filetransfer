@@ -62,9 +62,31 @@ def _env(name, default=None):
     return v if v not in (None, "") else default
 
 BASE_DIR        = Path(__file__).resolve().parent
-UPLOAD_DIR      = Path(_env("UPLOAD_DIR", str(BASE_DIR / "uploads"))).resolve()
-TOKENS_FILE     = Path(_env("TOKENS_FILE", str(BASE_DIR / "tokens.json"))).resolve()
-QR_DIR          = Path(_env("QR_DIR", str(BASE_DIR / "qrcodes"))).resolve()
+
+def _safe_dir(configured: str, fallback: Path) -> Path:
+    """설정 경로에 폴더를 만들어 보고, 권한/부재 등으로 실패하면 fallback 으로 대체.
+    (예: Render 무료 플랜에서 디스크 없이 /data 경로를 지정하면 부팅 크래시 → 방어)."""
+    p = Path(configured).resolve()
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    except Exception as e:
+        fb = fallback.resolve()
+        fb.mkdir(parents=True, exist_ok=True)
+        print(f"[warn] 경로 '{p}' 사용 불가({e.__class__.__name__}) → '{fb}' 로 대체")
+        return fb
+
+UPLOAD_DIR      = _safe_dir(_env("UPLOAD_DIR", str(BASE_DIR / "uploads")), BASE_DIR / "uploads")
+QR_DIR          = _safe_dir(_env("QR_DIR", str(BASE_DIR / "qrcodes")), BASE_DIR / "qrcodes")
+# TOKENS_FILE 은 파일 → 부모 폴더가 쓰기 가능한지로 판단
+_tok_cfg        = Path(_env("TOKENS_FILE", str(BASE_DIR / "tokens.json"))).resolve()
+try:
+    _tok_cfg.parent.mkdir(parents=True, exist_ok=True)
+    TOKENS_FILE = _tok_cfg
+except Exception as e:
+    (BASE_DIR).mkdir(parents=True, exist_ok=True)
+    TOKENS_FILE = (BASE_DIR / "tokens.json").resolve()
+    print(f"[warn] TOKENS_FILE '{_tok_cfg}' 사용 불가({e.__class__.__name__}) → '{TOKENS_FILE}' 로 대체")
 
 PORT            = int(_env("PORT", "8000"))
 HOST            = _env("HOST", "0.0.0.0")
@@ -85,9 +107,6 @@ REQUIRE_PIN     = _env("REQUIRE_PIN", "false").lower() in ("1", "true", "yes", "
 ADMIN_KEY       = _env("ADMIN_KEY", "")   # 설정 시 /admin?key=... 로 전체 QR 대시보드 접근
 SESSION_SECRET  = _env("SESSION_SECRET") or secrets.token_hex(32)
 PRINT_QR_ON_START = _env("PRINT_QR_ON_START", "true").lower() in ("1", "true", "yes", "on")
-
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-QR_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────
