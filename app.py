@@ -49,7 +49,7 @@ except Exception:
 import qrcode
 from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException
 from fastapi.responses import (
-    HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, RedirectResponse,
+    HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response,
 )
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -82,6 +82,7 @@ ALLOWED_EXT     = set(
 )
 
 REQUIRE_PIN     = _env("REQUIRE_PIN", "false").lower() in ("1", "true", "yes", "on")
+ADMIN_KEY       = _env("ADMIN_KEY", "")   # 설정 시 /admin?key=... 로 전체 QR 대시보드 접근
 SESSION_SECRET  = _env("SESSION_SECRET") or secrets.token_hex(32)
 PRINT_QR_ON_START = _env("PRINT_QR_ON_START", "true").lower() in ("1", "true", "yes", "on")
 
@@ -458,6 +459,38 @@ def download(token: str, filename: str, request: Request):
     # FileResponse: 스트리밍 + 한글 파일명(Content-Disposition filename* 자동 처리)
     return FileResponse(path, media_type=media, filename=path.name)
 
+@app.get("/u/{token}/qr.png")
+def qr_image(token: str):
+    """이 토큰 업로드 URL의 QR을 PNG 이미지로 반환(브라우저에서 바로 열림)."""
+    require_token(token)
+    return Response(content=qr_png_bytes(upload_url(token)), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+@app.get("/u/{token}/qr", response_class=HTMLResponse)
+def qr_page(token: str):
+    """QR + URL을 크게 보여주는 페이지(화면에 띄워 보여주기 좋음)."""
+    info = require_token(token)
+    url = upload_url(token)
+    name = _html(info.get("name", ""))
+    return HTMLResponse(f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>업로드 QR · {name}</title>{CSS}</head><body style="text-align:center">
+<h1>📷 사진 업로드 QR</h1>
+<div class="sub">{name}</div>
+<div class="card" style="display:inline-block">
+  <img src="/u/{token}/qr.png" alt="QR" style="width:min(80vw,340px);height:auto">
+  <div style="margin-top:8px"><a href="{url}" style="word-break:break-all">{_html(url)}</a></div>
+</div>
+<div class="hint">폰 카메라로 이 QR을 스캔하세요.</div>
+</body></html>""")
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin(key: str = ""):
+    """관리자 대시보드: 활성 토큰 전체의 QR/URL을 한 페이지에. ADMIN_KEY 로 보호."""
+    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
+        raise HTTPException(status_code=404, detail="Not found")   # 존재 자체를 숨김
+    return HTMLResponse(render_admin_page())
+
 
 # ──────────────────────────────────────────────────────────────
 # HTML 렌더링 (단일 파일 유지 위해 인라인)
@@ -585,6 +618,40 @@ def render_pin_page(token: str, error: str = "") -> str:
     {err}
   </form>
 </div></body></html>"""
+
+
+def render_admin_page() -> str:
+    data = load_tokens()
+    active = [(t, i) for t, i in data.items() if not i.get("revoked")]
+    active.sort(key=lambda x: x[1].get("name", ""))
+    cards = ""
+    for t, i in active:
+        url = upload_url(t)
+        cards += (f'<div class="qcard">'
+                  f'<img src="/u/{t}/qr.png" alt="QR">'
+                  f'<div class="qname">{_html(i.get("name",""))}</div>'
+                  f'<a class="qurl" href="{url}">{_html(url)}</a>'
+                  f'</div>')
+    if not active:
+        cards = '<p>활성 토큰이 없습니다. <code>python app.py issue --name "이름"</code> 또는 PRESET_TOKENS 로 발급하세요.</p>'
+    return f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QR 대시보드</title>{CSS}
+<style>
+  .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:14px; }}
+  .qcard {{ border:1px solid #8883; border-radius:12px; padding:14px; text-align:center; page-break-inside:avoid; }}
+  .qcard img {{ width:100%; max-width:200px; height:auto; }}
+  .qname {{ font-weight:700; margin-top:8px; }}
+  .qurl {{ font-size:.72rem; color:#2d6cdf; word-break:break-all; text-decoration:none; }}
+  @media print {{ .noprint {{ display:none; }} body {{ padding:0; }} }}
+</style></head><body>
+<div class="row noprint" style="justify-content:space-between; margin-bottom:12px">
+  <h1 style="margin:0">🗂️ QR 대시보드 <span class="hint">({len(active)}명)</span></h1>
+  <button onclick="window.print()">인쇄</button>
+</div>
+<div class="hint noprint" style="margin-bottom:12px">각 QR을 현장 작업자에게 전달하세요. 인쇄해서 나눠줘도 됩니다.</div>
+<div class="grid">{cards}</div>
+</body></html>"""
 
 
 def _html(s: str) -> str:

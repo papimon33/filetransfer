@@ -23,6 +23,8 @@ services:
         value: "jpg,jpeg,png,heic,webp"
       - key: REQUIRE_PIN
         value: "false"
+      - key: ADMIN_KEY                 # 전체 QR 대시보드(/admin?key=...) 보호키. 자동 생성(강력)
+        generateValue: true
       - key: SESSION_SECRET            # 자동 생성(고정) → PIN 세션이 재배포 후에도 유지
         generateValue: true
       - key: UPLOAD_DIR
