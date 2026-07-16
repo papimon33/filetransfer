@@ -542,12 +542,31 @@ def qr_page(token: str):
 <div class="hint">폰 카메라로 이 QR을 스캔하세요.</div>
 </body></html>""")
 
+def _admin_ok(key: str) -> bool:
+    return bool(ADMIN_KEY) and secrets.compare_digest(key or "", ADMIN_KEY)
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin(key: str = ""):
-    """관리자 대시보드: 활성 토큰 전체의 QR/URL을 한 페이지에. ADMIN_KEY 로 보호."""
-    if not ADMIN_KEY or not secrets.compare_digest(key, ADMIN_KEY):
+    """관리 콘솔: 토큰 발급/폐기 + 전체 QR/URL. ADMIN_KEY 로 보호."""
+    if not _admin_ok(key):
         raise HTTPException(status_code=404, detail="Not found")   # 존재 자체를 숨김
-    return HTMLResponse(render_admin_page())
+    return HTMLResponse(render_admin_page(key))
+
+@app.post("/admin/create")
+def admin_create(key: str = Form(...), name: str = Form(...)):
+    """관리 콘솔에서 이름 입력으로 새 토큰 발급."""
+    if not _admin_ok(key):
+        raise HTTPException(status_code=404, detail="Not found")
+    issue_token((name or "").strip() or "(이름없음)")
+    return RedirectResponse(url=f"/admin?key={_url_quote(key)}", status_code=303)
+
+@app.post("/admin/revoke")
+def admin_revoke(key: str = Form(...), token: str = Form(...)):
+    """관리 콘솔에서 토큰 폐기(접근 차단)."""
+    if not _admin_ok(key):
+        raise HTTPException(status_code=404, detail="Not found")
+    revoke_token(token)
+    return RedirectResponse(url=f"/admin?key={_url_quote(key)}", status_code=303)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -814,10 +833,11 @@ def render_pin_page(token: str, error: str = "") -> str:
 </div></body></html>"""
 
 
-def render_admin_page() -> str:
+def render_admin_page(key: str) -> str:
     data = load_tokens()
     active = [(t, i) for t, i in data.items() if not i.get("revoked")]
     active.sort(key=lambda x: x[1].get("name", ""))
+    k = _html(key)
     cards = ""
     for t, i in active:
         url = upload_url(t)
@@ -825,26 +845,56 @@ def render_admin_page() -> str:
                   f'<img src="/u/{t}/qr.png" alt="QR">'
                   f'<div class="qname">{_html(i.get("name",""))}</div>'
                   f'<a class="qurl" href="{url}">{_html(url)}</a>'
+                  f'<form method="post" action="/admin/revoke" class="noprint" style="margin-top:8px" '
+                  f'onsubmit="return confirm(\'이 토큰을 폐기할까요? 해당 사용자는 접근이 차단됩니다.\')">'
+                  f'<input type="hidden" name="key" value="{k}"><input type="hidden" name="token" value="{t}">'
+                  f'<button class="revoke" type="submit">폐기</button></form>'
                   f'</div>')
     if not active:
-        cards = '<p>활성 토큰이 없습니다. <code>python app.py issue --name "이름"</code> 또는 PRESET_TOKENS 로 발급하세요.</p>'
+        cards = '<p class="hint">아직 발급된 토큰이 없습니다. 위에서 이름을 입력해 발급하세요.</p>'
+    preset_value = _html(",".join(f"{t}={i.get('name','')}" for t, i in active))
     return f"""<!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>QR 대시보드</title>{CSS}
+<title>관리 콘솔</title>{CSS}
 <style>
   .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:14px; }}
   .qcard {{ border:1px solid #8883; border-radius:12px; padding:14px; text-align:center; page-break-inside:avoid; }}
   .qcard img {{ width:100%; max-width:200px; height:auto; }}
   .qname {{ font-weight:700; margin-top:8px; }}
-  .qurl {{ font-size:.72rem; color:#2d6cdf; word-break:break-all; text-decoration:none; }}
+  .qurl {{ font-size:.72rem; color:var(--blue); word-break:break-all; text-decoration:none; display:block; }}
+  .revoke {{ font-size:.8rem; padding:5px 12px; background:transparent; color:#dc2626; border:1px solid #dc262688; border-radius:8px; }}
+  textarea {{ width:100%; min-height:64px; font-family:monospace; font-size:.8rem; border-radius:8px;
+              border:1px solid #8886; padding:8px; background:#8881; color:inherit; }}
+  input[type=text] {{ padding:11px 12px; font-size:1rem; border-radius:10px; border:1px solid #8886;
+                      background:transparent; color:inherit; }}
   @media print {{ .noprint {{ display:none; }} body {{ padding:0; }} }}
 </style></head><body>
 <div class="row noprint" style="justify-content:space-between; margin-bottom:12px">
-  <h1 style="margin:0">🗂️ QR 대시보드 <span class="hint">({len(active)}명)</span></h1>
-  <button onclick="window.print()">인쇄</button>
+  <h1 style="margin:0">🗂️ 관리 콘솔 <span class="hint">({len(active)}명)</span></h1>
+  <button onclick="window.print()">QR 인쇄</button>
 </div>
-<div class="hint noprint" style="margin-bottom:12px">각 QR을 현장 작업자에게 전달하세요. 인쇄해서 나눠줘도 됩니다.</div>
+
+<div class="card noprint">
+  <strong>➕ 새 토큰 발급</strong>
+  <form method="post" action="/admin/create" class="row" style="margin-top:10px; gap:8px">
+    <input type="hidden" name="key" value="{k}">
+    <input type="text" name="name" placeholder="이름 (예: 홍길동)" required style="flex:1; min-width:160px">
+    <button type="submit">발급</button>
+  </form>
+  <div class="hint" style="margin-top:8px">발급하면 아래 목록에 QR과 함께 나타납니다. 잃어버려도 여기서 다시 확인/재발급하면 됩니다.</div>
+</div>
+
 <div class="grid">{cards}</div>
+
+<div class="card noprint" style="margin-top:16px">
+  <strong>💾 토큰 영구 보존용 <code>PRESET_TOKENS</code></strong>
+  <div class="hint" style="margin:6px 0 8px">
+    Render 무료 플랜은 재시작 시 초기화됩니다. 아래 값을 복사해 Render의 <b>Environment → PRESET_TOKENS</b> 에
+    붙여넣으면 재배포·재시작 후에도 같은 토큰이 유지됩니다. (유료 Disk를 붙였다면 불필요)
+  </div>
+  <textarea id="preset" readonly onclick="this.select()">{preset_value}</textarea>
+  <div style="margin-top:8px"><button type="button" onclick="navigator.clipboard.writeText(document.getElementById('preset').value); this.textContent='복사됨!'">복사</button></div>
+</div>
 </body></html>"""
 
 
