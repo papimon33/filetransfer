@@ -26,7 +26,7 @@ services:
       - key: CLEANUP_INTERVAL_MIN
         value: "30"
       - key: ALLOWED_EXT
-        value: "jpg,jpeg,png,heic,webp"
+        value: "jpg,jpeg,png,heic,heif,webp,gif,bmp,tif,tiff,pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip"
       - key: REQUIRE_PIN
         value: "false"
       - key: ADMIN_PASSWORD            # 관리 콘솔 로그인 비밀번호 — 기억하기 쉬운 값으로 대시보드에서 직접 입력

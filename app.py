@@ -99,7 +99,10 @@ CLEANUP_MIN     = float(_env("CLEANUP_INTERVAL_MIN", "30"))
 
 ALLOWED_EXT     = set(
     e.strip().lower().lstrip(".")
-    for e in _env("ALLOWED_EXT", "jpg,jpeg,png,heic,webp").split(",")
+    for e in _env("ALLOWED_EXT",
+                  "jpg,jpeg,png,heic,heif,webp,gif,bmp,tif,tiff,"          # 이미지
+                  "pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip"    # 문서/압축
+                  ).split(",")
     if e.strip()
 )
 
@@ -781,6 +784,9 @@ CSS = """
   .bigbtn .ico { font-size:2rem; }
   .thumbs { display:grid; grid-template-columns:repeat(auto-fill,minmax(84px,1fr)); gap:8px; margin-top:12px; }
   .thumbs .t { aspect-ratio:1; border-radius:10px; overflow:hidden; background:#8882; }
+  .thumbs .t.doc { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; padding:4px; text-align:center; }
+  .thumbs .t.doc span { font-size:1.8rem; }
+  .thumbs .t.doc small { font-size:.6rem; word-break:break-all; line-height:1.1; max-height:2.4em; overflow:hidden; }
   .thumbs .t img { width:100%; height:100%; object-fit:cover; }
   .sticky { position:sticky; bottom:0; padding:12px 0; background:linear-gradient(to top, var(--bg) 72%, transparent); }
   .upbtn { width:100%; font-size:1.15rem; padding:16px; border-radius:14px; }
@@ -806,10 +812,10 @@ def render_mobile_upload_page(token: str, info: dict) -> str:
 <div class="card">
   <div class="row" style="gap:12px">
     <button class="bigbtn" id="btnCam" type="button"><span class="ico">📷</span>사진 촬영</button>
-    <button class="bigbtn" id="btnGal" type="button"><span class="ico">🖼️</span>앨범에서 선택</button>
+    <button class="bigbtn" id="btnGal" type="button"><span class="ico">📎</span>사진·문서 선택</button>
   </div>
   <input id="cam" type="file" accept="image/*" capture="environment" multiple hidden>
-  <input id="gal" type="file" accept="image/*" multiple hidden>
+  <input id="gal" type="file" multiple hidden>
   <div class="thumbs" id="thumbs"></div>
   <div id="msg"></div>
 </div>
@@ -829,11 +835,17 @@ function refresh() {{
   thumbs.innerHTML = '';
   for (const f of picked) {{
     const d = document.createElement('div'); d.className = 't';
-    const img = document.createElement('img'); img.src = URL.createObjectURL(f);
-    d.appendChild(img); thumbs.appendChild(d);
+    if (f.type && f.type.indexOf('image/') === 0) {{
+      const img = document.createElement('img'); img.src = URL.createObjectURL(f);
+      d.appendChild(img);
+    }} else {{
+      d.classList.add('doc');
+      d.innerHTML = '<span>📄</span><small>' + f.name.replace(/</g,'&lt;') + '</small>';
+    }}
+    thumbs.appendChild(d);
   }}
   up.disabled = picked.length === 0;
-  up.textContent = '업로드 (' + picked.length + '장)';
+  up.textContent = '업로드 (' + picked.length + '개)';
 }}
 function addFiles(list) {{ for (const f of list) picked.push(f); refresh(); }}
 $('#btnCam').onclick = () => $('#cam').click();
@@ -849,7 +861,7 @@ up.onclick = async () => {{
   try {{
     const r = await fetch('/u/' + token + '/upload', {{ method: 'POST', body: fd }});
     const j = await r.json();
-    let h = '<span class="ok">✅ ' + j.uploaded + '장 업로드 완료!</span>';
+    let h = '<span class="ok">✅ ' + j.uploaded + '개 업로드 완료!</span>';
     if (j.errors && j.errors.length) h += '<br><span class="err">실패 ' + j.errors.length + '건: ' + j.errors.join(', ') + '</span>';
     msg.innerHTML = h;
     picked = []; refresh();
