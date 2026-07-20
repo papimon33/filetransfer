@@ -48,9 +48,46 @@ $csPath = Join-Path $InstallDir 'SecureGateSyncUI.cs'
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
 if (-not (Test-Path $csc)) { Write-Host '.NET Framework 컴파일러(csc)를 찾을 수 없습니다.' -ForegroundColor Red; return }
+# ── 앱 아이콘(.ico) 생성 → exe에 박아 바탕화면/탐색기에도 파란 카메라로 표시 ──
+$icoPath = Join-Path $InstallDir 'app.ico'
+try {
+    Add-Type -AssemblyName System.Drawing
+    $bmp = New-Object System.Drawing.Bitmap(256, 256)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $blue  = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(37,99,235))
+    $white = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::White)
+    $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $d = 112; $x = 8; $y = 8; $w = 240; $h = 240
+    $p.AddArc($x, $y, $d, $d, 180, 90)
+    $p.AddArc($x+$w-$d, $y, $d, $d, 270, 90)
+    $p.AddArc($x+$w-$d, $y+$h-$d, $d, $d, 0, 90)
+    $p.AddArc($x, $y+$h-$d, $d, $d, 90, 90)
+    $p.CloseFigure()
+    $g.FillPath($blue, $p)
+    $g.FillRectangle($white, 48, 96, 160, 104)   # 카메라 몸통
+    $g.FillRectangle($white, 88, 64, 56, 32)     # 뷰파인더
+    $g.FillEllipse($blue, 96, 112, 64, 64)       # 렌즈 테
+    $g.FillEllipse($white, 112, 128, 32, 32)     # 렌즈 안
+    $g.Dispose()
+    $ms = New-Object System.IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $png = $ms.ToArray(); $ms.Dispose(); $bmp.Dispose()
+    # ICO 컨테이너(PNG 방식, Vista+)
+    $fs = [System.IO.File]::Create($icoPath)
+    $bw = New-Object System.IO.BinaryWriter($fs)
+    $bw.Write([UInt16]0); $bw.Write([UInt16]1); $bw.Write([UInt16]1)          # reserved, type=icon, count=1
+    $bw.Write([Byte]0); $bw.Write([Byte]0); $bw.Write([Byte]0); $bw.Write([Byte]0)  # 256x256, colors, reserved
+    $bw.Write([UInt16]1); $bw.Write([UInt16]32)                                # planes, bpp
+    $bw.Write([UInt32]$png.Length); $bw.Write([UInt32]22)                      # size, offset
+    $bw.Write($png); $bw.Flush(); $bw.Close(); $fs.Close()
+} catch { Write-Host "아이콘 생성 실패(기본 아이콘 사용): $($_.Exception.Message)" -ForegroundColor Yellow; $icoPath = $null }
+
 $cscArgs = @('/nologo','/target:winexe',"/out:$exe",
-             '/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll','/r:Microsoft.CSharp.dll',
-             $csPath)
+             '/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll','/r:Microsoft.CSharp.dll')
+if ($icoPath -and (Test-Path $icoPath)) { $cscArgs += "/win32icon:$icoPath" }
+$cscArgs += $csPath
 & $csc $cscArgs | Out-Null
 if (-not (Test-Path $exe)) { Write-Host 'GUI 앱 컴파일 실패.' -ForegroundColor Red; return }
 
@@ -73,9 +110,9 @@ listdir=$listdir
 try {
     $wsh = New-Object -ComObject WScript.Shell
     $d = $wsh.CreateShortcut($desktopLnk); $d.TargetPath = $exe; $d.WorkingDirectory = $InstallDir
-    $d.Description = 'SecureGate 사진 자동전송'; $d.Save()
+    $d.Description = 'SecureGate 사진 자동전송'; $d.IconLocation = "$exe,0"; $d.Save()
     $s = $wsh.CreateShortcut($startupLnk); $s.TargetPath = $exe; $s.Arguments = '/tray'; $s.WorkingDirectory = $InstallDir
-    $s.WindowStyle = 7; $s.Description = 'SecureGate 사진 자동전송'; $s.Save()
+    $s.WindowStyle = 7; $s.Description = 'SecureGate 사진 자동전송'; $s.IconLocation = "$exe,0"; $s.Save()
 } catch { Write-Host "바로가기 생성 실패: $($_.Exception.Message)" -ForegroundColor Yellow }
 
 # ── 앱 실행 ──

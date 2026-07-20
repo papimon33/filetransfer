@@ -69,7 +69,7 @@ public class SyncUI : Form {
             LoadQr();
             StartSync();
             SetStatus("동기화 중 — 폰 업로드를 기다립니다.");
-            if (startTray) { WindowState = FormWindowState.Minimized; ShowInTaskbar = false; BeginInvoke((Action)(() => Hide())); }
+            if (startTray) startHidden = true;   // 실제 숨김은 SetVisibleCore 에서(핸들 생성 후)
         } else {
             SetStatus("사번을 입력하고 [발급/등록]을 누르세요.");
         }
@@ -146,6 +146,19 @@ public class SyncUI : Form {
         FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; tray.ShowBalloonTip(1500, "SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료하려면 트레이 아이콘 우클릭 → 종료.", ToolTipIcon.Info); } };
     }
     void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
+
+    // 자동시작(/tray): 첫 표시를 건너뛰고 트레이로만 뜸.
+    // 생성자에서 Hide()/BeginInvoke 를 부르면 핸들 미생성으로 예외 → 프로세스 즉사하므로 여기서 처리.
+    bool startHidden;
+    protected override void SetVisibleCore(bool value) {
+        if (startHidden) {
+            startHidden = false;
+            if (!IsHandleCreated) CreateHandle();   // 핸들만 생성(화면 표시 X)
+            ShowInTaskbar = false;
+            value = false;
+        }
+        base.SetVisibleCore(value);
+    }
 
     // 파란 둥근 사각 위에 흰 카메라 — 코드로 그려 .ico 파일 없이 아이콘 생성
     static Icon MakeAppIcon() {
