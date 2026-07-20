@@ -812,10 +812,12 @@ def render_mobile_upload_page(token: str, info: dict) -> str:
 <div class="card">
   <div class="row" style="gap:12px">
     <button class="bigbtn" id="btnCam" type="button"><span class="ico">📷</span>사진 촬영</button>
-    <button class="bigbtn" id="btnGal" type="button"><span class="ico">📎</span>사진·문서 선택</button>
+    <button class="bigbtn" id="btnGal" type="button"><span class="ico">🖼️</span>갤러리</button>
+    <button class="bigbtn" id="btnDoc" type="button"><span class="ico">📎</span>문서</button>
   </div>
   <input id="cam" type="file" accept="image/*" capture="environment" multiple hidden>
-  <input id="gal" type="file" multiple hidden>
+  <input id="gal" type="file" accept="image/*" multiple hidden>
+  <input id="doc" type="file" multiple hidden>
   <div class="thumbs" id="thumbs"></div>
   <div id="msg"></div>
 </div>
@@ -850,8 +852,10 @@ function refresh() {{
 function addFiles(list) {{ for (const f of list) picked.push(f); refresh(); }}
 $('#btnCam').onclick = () => $('#cam').click();
 $('#btnGal').onclick = () => $('#gal').click();
+$('#btnDoc').onclick = () => $('#doc').click();
 $('#cam').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
 $('#gal').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
+$('#doc').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
 
 up.onclick = async () => {{
   if (!picked.length) return;

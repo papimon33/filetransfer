@@ -37,7 +37,7 @@ with TestClient(A.app) as c:
     check("모바일→업로드페이지", "사진 올리기" in rm.text)
     check("/m 강제 업로드페이지", "사진 올리기" in c.get(f"/u/{tA}/m").text)
     check("/d 강제 다운로드페이지", "파일 다운로드" in c.get(f"/u/{tA}/d").text)
-    check("업로드페이지 촬영/파일 버튼", ("사진 촬영" in rm.text and "사진·문서 선택" in rm.text))
+    check("업로드페이지 촬영/갤러리/문서 버튼", ("사진 촬영" in rm.text and "갤러리" in rm.text and ">문서<" in rm.text))
     check("다운로드페이지 QR모달", "모바일 QR" in r.text and "qrmodal" in r.text)
 
     # 3) 업로드 (jpg 2장 + 한글파일명 + 금지확장자 txt)
