@@ -31,14 +31,28 @@ public class SyncUI : Form {
     Thread syncThread;
     volatile bool running = true;
 
+    const string MUTEX_NAME = "SecureGateSyncUI_SingleInstance";
+    const string EVENT_NAME = "SecureGateSyncUI_ShowWindow";
+    static Mutex _mutex;
+    static EventWaitHandle _showEvent;
+
     [STAThread]
     static void Main(string[] args) {
+        bool createdNew;
+        _mutex = new Mutex(true, MUTEX_NAME, out createdNew);
+        if (!createdNew) {
+            // 이미 실행 중 — 기존 인스턴스에게 "창 보이기" 신호만 보내고 종료
+            try { EventWaitHandle.OpenExisting(EVENT_NAME).Set(); } catch { }
+            return;
+        }
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, EVENT_NAME);
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         bool startTray = false;
         foreach (var a in args) if (a == "/tray") startTray = true;
         Application.Run(new SyncUI(startTray));
+        GC.KeepAlive(_mutex);
     }
 
     public SyncUI(bool startTray) {
@@ -48,6 +62,7 @@ public class SyncUI : Form {
         logPath = Path.Combine(dir, "ui.log");
         LoadConfig();
         BuildUi();
+        StartShowListener();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
             LoadQr();
@@ -124,10 +139,22 @@ public class SyncUI : Form {
         menu.MenuItems.Add("종료", (s, e) => { running = false; tray.Visible = false; Application.Exit(); });
         tray.ContextMenu = menu;
         tray.DoubleClick += (s, e) => ShowWindow();
-        Resize += (s, e) => { if (WindowState == FormWindowState.Minimized) { Hide(); ShowInTaskbar = false; } };
+        // 최소화(_)는 기본 동작 유지 → 작업표시줄에 남음. 닫기(X)만 트레이로 보냄.
         FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; tray.ShowBalloonTip(1500, "SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료하려면 트레이 아이콘 우클릭 → 종료.", ToolTipIcon.Info); } };
     }
-    void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); }
+    void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
+
+    // 중복 실행 시 두 번째 인스턴스가 보낸 신호를 받아 창을 앞으로
+    void StartShowListener() {
+        if (_showEvent == null) return;
+        var t = new Thread(() => {
+            while (running) {
+                try { if (_showEvent.WaitOne(1000)) { try { BeginInvoke((Action)(() => ShowWindow())); } catch { } } }
+                catch { break; }
+            }
+        });
+        t.IsBackground = true; t.Start();
+    }
     string StartupLnk() { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "SecureGateSync.lnk"); }
 
     void SetAutostart(bool on) {
