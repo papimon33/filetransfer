@@ -11,7 +11,13 @@ services:
     envVars:
       - key: BASE_URL                  # 배포 후 https://<앱>.onrender.com 로 채우세요(대시보드에서 입력)
         sync: false
-      - key: PRESET_TOKENS             # 고정 토큰 "토큰=이름,토큰=이름" (무료 플랜 필수) — 대시보드에서 입력
+      - key: MONGODB_URI               # ★ MongoDB Atlas 연결문자열(<db_password> 채워서 대시보드에 입력) — 토큰 영구저장
+        sync: false
+      - key: MONGODB_DB
+        value: filetransfer
+      - key: ENROLL_KEY                # (선택) 사번 자가발급에 가입코드 요구. 비우면 사번만으로 발급.
+        sync: false
+      - key: PRESET_TOKENS             # (선택) 기존 토큰 마이그레이션용 "토큰=이름". Mongo 쓰면 대개 불필요
         sync: false
       - key: MAX_FILE_MB
         value: "30"

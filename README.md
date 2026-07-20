@@ -121,6 +121,16 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 - ⚠️ 모든 토큰/설치파일에 접근되므로 **강한 비밀번호**로 두고 HTTPS로만 접속하세요.
   키가 노출됐다면 `ADMIN_PASSWORD`/`ADMIN_KEY` 를 바꿔 즉시 교체(rotate)하면 됩니다.
 
+## 토큰 발급 — 사번 자가발급 (`/enroll`)
+
+`https://<앱>.onrender.com/enroll` 접속 → **사번 5글자(영문/숫자)** 입력 → 발급:
+- **개인 업로드 QR**(폰용) + **PC 설치파일(.ps1)** 다운로드 버튼이 나옵니다.
+- **이미 발급된 사번**이면 경고 후 **새 토큰으로 재발급**(기존 토큰·설치는 무효 → 새 설치파일로 재설치).
+- 토큰은 **MongoDB Atlas**(`MONGODB_URI` 설정 시)에 저장되어 재배포·재시작에도 유지됩니다.
+- (선택) `ENROLL_KEY` 를 설정하면 발급 시 가입코드도 요구합니다.
+
+관리자는 `/admin` 로그인 → 발급 현황(사번·QR·설치파일·발급시각) 조회/폐기.
+
 ## 사무실 PC 자동연동 — 원클릭 설치 (권장)
 
 처음 쓰는 사람도 **더블클릭 한 번**으로 끝나도록, 관리 콘솔에서 **개인별 설치파일**을 받습니다.
@@ -232,6 +242,9 @@ Render 대시보드 → 서비스 → **Environment** 에 아래를 등록:
 | `MAX_FILE_MB` | `30` | 개당 최대 업로드 크기(MB) |
 | `RETENTION_HOURS` | `6` | 이 시간 지난 파일 자동 삭제 |
 | `CLEANUP_INTERVAL_MIN` | `30` | 자동 삭제 점검 주기(분) |
+| `MONGODB_URI` | (없음) | MongoDB Atlas 연결문자열. 설정 시 토큰을 DB에 영구 저장(재배포 유지) |
+| `MONGODB_DB` | `filetransfer` | MongoDB 데이터베이스 이름 |
+| `ENROLL_KEY` | (없음) | `/enroll` 사번 발급 가입코드(선택) |
 | `ADMIN_PASSWORD` | (없음) | 관리 콘솔 로그인 비밀번호(권장). 미설정 시 `ADMIN_KEY` 사용 |
 | `ADMIN_KEY` | (없음) | 관리 콘솔 접근/로그인 대체값. 둘 다 비면 `/admin` 비활성화 |
 | `REQUIRE_PIN` | `false` | PIN 게이트 on/off |

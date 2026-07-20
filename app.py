@@ -107,71 +107,124 @@ REQUIRE_PIN     = _env("REQUIRE_PIN", "false").lower() in ("1", "true", "yes", "
 ADMIN_KEY       = _env("ADMIN_KEY", "")        # 관리 콘솔 접근용(로그인 비밀번호로도 사용됨)
 ADMIN_PASSWORD  = _env("ADMIN_PASSWORD", "")   # 관리자 로그인 비밀번호(미설정 시 ADMIN_KEY 사용)
 DELETE_ON_DOWNLOAD = _env("DELETE_ON_DOWNLOAD", "true").lower() in ("1", "true", "yes", "on")
+ENROLL_KEY      = _env("ENROLL_KEY", "")       # 설정 시 사번 자가발급에 가입코드 필요(선택)
 SESSION_SECRET  = _env("SESSION_SECRET") or secrets.token_hex(32)
 PRINT_QR_ON_START = _env("PRINT_QR_ON_START", "true").lower() in ("1", "true", "yes", "on")
 
 
 # ──────────────────────────────────────────────────────────────
-# 토큰 저장소 (tokens.json)
-#   { "<token>": {"name": str, "created": iso, "revoked": bool, "pin": sha256|null} }
+# 토큰 저장소 — MongoDB Atlas(MONGODB_URI 설정 시) 또는 파일(로컬 개발 폴백)
+#   문서 shape: {token, sabeon(선택), name, created, revoked, pin}
 # ──────────────────────────────────────────────────────────────
-def load_tokens() -> dict:
-    if TOKENS_FILE.exists():
-        try:
-            return json.loads(TOKENS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+MONGODB_URI = _env("MONGODB_URI", "")
+MONGODB_DB  = _env("MONGODB_DB", "filetransfer")
 
-def save_tokens(data: dict) -> None:
-    tmp = TOKENS_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(TOKENS_FILE)
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 def hash_pin(token: str, pin: str) -> str:
     return hashlib.sha256(f"{token}:{pin}".encode("utf-8")).hexdigest()
 
+class _MongoStore:
+    def __init__(self, uri: str, dbname: str):
+        from pymongo import MongoClient, ASCENDING
+        self._col = MongoClient(uri, serverSelectionTimeoutMS=8000, connectTimeoutMS=8000)[dbname]["tokens"]
+        self._col.create_index([("token", ASCENDING)], unique=True)
+        self._col.create_index([("sabeon", ASCENDING)], unique=True, sparse=True)
+    def by_token(self, token):  return self._col.find_one({"token": token})
+    def by_sabeon(self, sabeon): return self._col.find_one({"sabeon": sabeon})
+    def insert(self, doc):      self._col.insert_one(dict(doc))
+    def set_token(self, sabeon, token):
+        self._col.update_one({"sabeon": sabeon}, {"$set": {"token": token, "revoked": False, "reissued": now_iso()}})
+    def revoke(self, token):
+        return self._col.update_one({"token": token}, {"$set": {"revoked": True}}).matched_count > 0
+    def all(self):              return list(self._col.find({}, {"_id": 0}))
+
+class _FileStore:
+    def __init__(self, path): self.path = path
+    def _load(self):
+        if not self.path.exists(): return []
+        try: data = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception: return []
+        if isinstance(data, dict):   # 구 형식 {token: info} → 리스트로 변환
+            return [dict(i, token=t) for t, i in data.items()]
+        return data if isinstance(data, list) else []
+    def _save(self, docs):
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+    def by_token(self, token):
+        return next((d for d in self._load() if d.get("token") == token), None)
+    def by_sabeon(self, sabeon):
+        return next((d for d in self._load() if d.get("sabeon") == sabeon), None)
+    def insert(self, doc):
+        docs = self._load(); docs.append(dict(doc)); self._save(docs)
+    def set_token(self, sabeon, token):
+        docs = self._load()
+        for d in docs:
+            if d.get("sabeon") == sabeon:
+                d["token"] = token; d["revoked"] = False; d["reissued"] = now_iso()
+        self._save(docs)
+    def revoke(self, token):
+        docs = self._load(); found = False
+        for d in docs:
+            if d.get("token") == token: d["revoked"] = True; found = True
+        if found: self._save(docs)
+        return found
+    def all(self): return self._load()
+
+def _make_store():
+    if MONGODB_URI:
+        try:
+            s = _MongoStore(MONGODB_URI, MONGODB_DB)
+            print(f"[store] MongoDB 사용 (db={MONGODB_DB})")
+            return s
+        except Exception as e:
+            print(f"[store] MongoDB 연결 실패 → 파일 저장소로 대체: {e}")
+    return _FileStore(TOKENS_FILE)
+
+store = _make_store()
+
 def issue_token(name: str, pin: str | None = None) -> str:
-    data = load_tokens()
-    token = secrets.token_urlsafe(24)          # 추측 불가능한 랜덤 (URL-safe: [A-Za-z0-9_-])
-    data[token] = {
-        "name": name,
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "revoked": False,
-        "pin": hash_pin(token, pin) if pin else None,
-    }
-    save_tokens(data)
+    """이름 기반 토큰 발급(관리자/CLI). 사번 없음."""
+    token = secrets.token_urlsafe(24)
+    store.insert({"name": name, "token": token, "created": now_iso(),
+                  "revoked": False, "pin": hash_pin(token, pin) if pin else None})
     (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
     return token
 
-def revoke_token(token: str) -> bool:
-    data = load_tokens()
-    if token in data:
-        data[token]["revoked"] = True
-        save_tokens(data)
-        return True
-    return False
+def issue_for_sabeon(sabeon: str):
+    """사번 기반 발급. 반환 (token, reissued:bool). 이미 있으면 새 토큰으로 재발급."""
+    token = secrets.token_urlsafe(24)
+    if store.by_sabeon(sabeon):
+        store.set_token(sabeon, token)
+        (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
+        return token, True
+    store.insert({"sabeon": sabeon, "name": sabeon, "token": token,
+                  "created": now_iso(), "revoked": False, "pin": None})
+    (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
+    return token, False
 
-def get_token_info(token: str) -> dict | None:
-    """유효(존재 + 미폐기)한 토큰이면 info dict, 아니면 None."""
+def revoke_token(token: str) -> bool:
+    return store.revoke(token)
+
+def get_token_info(token: str):
+    """유효(존재 + 미폐기)한 토큰이면 문서, 아니면 None."""
     if not is_token_shape(token):
         return None
-    info = load_tokens().get(token)
-    if not info or info.get("revoked"):
+    d = store.by_token(token)
+    if not d or d.get("revoked"):
         return None
-    return info
+    return d
+
+def list_active():
+    return [d for d in store.all() if not d.get("revoked")]
 
 def ensure_presets() -> int:
-    """
-    PRESET_TOKENS 환경변수의 토큰을 저장소에 병합한다.
-    형식: "토큰1=이름1,토큰2=이름2" (줄바꿈도 구분자로 허용)
-    Render 무료 플랜처럼 파일시스템이 임시라 tokens.json 이 초기화되는 환경에서,
-    토큰을 환경변수로 '고정'해 재시작 후에도 동일 토큰이 살아있게 한다.
-    """
+    """PRESET_TOKENS 환경변수의 토큰을 저장소에 병합(기존 배포분 호환/마이그레이션)."""
     raw = _env("PRESET_TOKENS", "")
     if not raw:
         return 0
-    data = load_tokens()
     added = 0
     for part in raw.replace("\n", ",").split(","):
         part = part.strip()
@@ -182,18 +235,11 @@ def ensure_presets() -> int:
         if not tok or not is_token_shape(tok):
             continue
         (UPLOAD_DIR / tok).mkdir(parents=True, exist_ok=True)
-        if tok not in data:
-            data[tok] = {
-                "name": name or "(preset)",
-                "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "revoked": False,
-                "pin": None,
-                "preset": True,
-            }
-            added += 1
-    if added:
         try:
-            save_tokens(data)
+            if store.by_token(tok) is None:
+                store.insert({"name": name or "(preset)", "token": tok, "created": now_iso(),
+                              "revoked": False, "pin": None, "preset": True})
+                added += 1
         except Exception as e:
             print(f"[preset] 저장 실패(무시): {e}")
     return added
@@ -330,33 +376,31 @@ async def cleanup_loop():
 
 
 def print_startup_info():
-    tokens = load_tokens()
-    active = {t: i for t, i in tokens.items() if not i.get("revoked")}
+    try:
+        active = list_active()
+    except Exception as e:
+        active = []
+        print(f"[startup] 토큰 목록 조회 실패: {e}")
     print("=" * 70)
     print(" QR 업로드 서버 시작")
     print(f"  기준 URL(BASE_URL) : {base_url()}"
           + ("" if BASE_URL_ENV else "  (BASE_URL 미설정 → LAN IP 자동감지. 폰이 같은 망이어야 함)"))
-    print(f"  업로드 폴더        : {UPLOAD_DIR}")
+    print(f"  저장소             : {'MongoDB (' + MONGODB_DB + ')' if MONGODB_URI else '파일(' + str(TOKENS_FILE) + ')'}")
     print(f"  허용 확장자        : {', '.join(sorted(ALLOWED_EXT))} / 개당 최대 {MAX_FILE_MB:.0f}MB")
     print(f"  자동 삭제          : {RETENTION_HOURS:.0f}시간 경과 파일 (점검 {CLEANUP_MIN:.0f}분 간격)")
     print(f"  PIN 게이트         : {'ON' if REQUIRE_PIN else 'OFF'}")
     print(f"  활성 토큰 수       : {len(active)}")
     print("=" * 70)
     if not active:
-        print(" 발급된 토큰이 없습니다.  python app.py issue --name \"이름\"  으로 발급하세요.")
+        print(" 발급된 토큰 없음.  /enroll 에서 사번 입력으로 발급하세요.")
         print("=" * 70)
         return
-    for token, info in active.items():
-        url = upload_url(token)
-        try:
-            save_qr_png(token)
-        except Exception:
-            pass
-        print(f"\n● {info.get('name','(이름없음)')}")
-        print(f"  URL : {url}")
-        print(f"  QR  : {QR_DIR / (token + '.png')}")
-        if PRINT_QR_ON_START:
-            print(qr_ascii(url))
+    for d in active:
+        token = d.get("token")
+        if not token:
+            continue
+        print(f"\n● {d.get('sabeon') or d.get('name') or '(이름없음)'}")
+        print(f"  URL : {upload_url(token)}")
     print("=" * 70)
 
 
@@ -396,15 +440,45 @@ def pin_ok(token: str, info: dict, request: Request) -> bool:
 
 
 # ── 라우트 ────────────────────────────────────────────────────
-@app.api_route("/", methods=["GET", "HEAD"], response_class=PlainTextResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def root():
-    # 보안상 토큰 목록을 노출하지 않는다.
-    return "QR Upload Server. 개인 토큰 URL(/u/<token>)로 접속하세요."
+    # 보안상 토큰 목록은 노출하지 않고, 발급 페이지로 안내만 한다.
+    return HTMLResponse(
+        '<!doctype html><meta charset="utf-8">'
+        '<meta http-equiv="refresh" content="0; url=/enroll">'
+        '<p>토큰 발급: <a href="/enroll">/enroll</a></p>'
+    )
 
 @app.api_route("/healthz", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 def healthz():
     # HEAD 도 허용: UptimeRobot 등 모니터가 HEAD 로 확인 시 405 나지 않도록.
     return "ok"
+
+def _valid_sabeon(sb: str) -> bool:
+    return len(sb) == 5 and sb.isalnum()
+
+@app.get("/enroll", response_class=HTMLResponse)
+def enroll_page():
+    return HTMLResponse(render_enroll_page())
+
+@app.post("/enroll", response_class=HTMLResponse)
+def enroll_submit(sabeon: str = Form(...), code: str = Form("")):
+    sb = (sabeon or "").strip()
+    if ENROLL_KEY and not secrets.compare_digest(code or "", ENROLL_KEY):
+        return HTMLResponse(render_enroll_page("가입코드가 올바르지 않습니다."), status_code=401)
+    if not _valid_sabeon(sb):
+        return HTMLResponse(render_enroll_page("사번은 영문/숫자 5글자여야 합니다."), status_code=400)
+    token, reissued = issue_for_sabeon(sb)
+    return HTMLResponse(render_enroll_result(sb, token, reissued))
+
+@app.get("/u/{token}/installer")
+def user_installer(token: str):
+    """토큰 보유자용 개인 설치파일(.ps1). 로그인 불필요(토큰을 알면 접근 가능)."""
+    if get_token_info(token) is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ps = build_installer_ps1(base_url(), token)
+    return Response(content=ps.encode("utf-8-sig"), media_type="text/plain",
+                    headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.ps1"'})
 
 def is_mobile(request: Request) -> bool:
     ua = request.headers.get("user-agent", "").lower()
@@ -949,6 +1023,54 @@ def render_pin_page(token: str, error: str = "") -> str:
 </div></body></html>"""
 
 
+def render_enroll_page(error: str = "") -> str:
+    err = f'<div class="err" style="margin-top:8px">{_html(error)}</div>' if error else ""
+    code_field = ('<input type="password" name="code" placeholder="가입코드" '
+                  'style="width:100%;padding:12px;font-size:1rem;border-radius:10px;border:1px solid #8886;'
+                  'background:transparent;color:inherit;margin-bottom:10px">') if ENROLL_KEY else ""
+    return f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>토큰 발급</title>{CSS}</head><body>
+<h1>🎫 토큰 발급</h1>
+<div class="sub">사번을 입력하면 개인 업로드 QR과 PC 설치파일이 발급됩니다.</div>
+<div class="card">
+  <form method="post" action="/enroll">
+    {code_field}
+    <input name="sabeon" maxlength="5" autocomplete="off" autofocus required placeholder="사번 5글자 (영문/숫자)"
+      style="width:100%;padding:12px;font-size:1.15rem;letter-spacing:.15em;text-align:center;border-radius:10px;border:1px solid #8886;background:transparent;color:inherit">
+    <div class="row" style="margin-top:12px"><button type="submit">발급 / 재발급</button></div>
+    {err}
+  </form>
+  <div class="hint" style="margin-top:10px">이미 발급받은 사번이면 새 토큰으로 <b>재발급</b>됩니다(기존 토큰은 무효).</div>
+</div></body></html>"""
+
+def render_enroll_result(sabeon: str, token: str, reissued: bool) -> str:
+    url = upload_url(token)
+    warn = ('<div class="card" style="border-color:#dc262688">'
+            '<b class="err">⚠ 이미 발급된 사번이라 재발급했습니다.</b>'
+            '<div class="hint">이전 토큰(및 그 토큰으로 설치된 PC)은 더 이상 동작하지 않습니다. '
+            '아래 새 설치파일로 다시 설치하세요.</div></div>') if reissued else ""
+    return f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>발급 완료 · {_html(sabeon)}</title>{CSS}</head><body>
+<h1>✅ 발급 완료</h1>
+<div class="sub">사번 {_html(sabeon)}</div>
+{warn}
+<div class="card" style="text-align:center">
+  <b>📱 폰 업로드 QR</b>
+  <div><img src="/u/{token}/qr.png" alt="QR" style="width:240px;max-width:70vw"></div>
+  <div style="font-size:.8rem"><a href="{url}">{_html(url)}</a></div>
+  <div class="hint">폰 카메라로 스캔 → 사진 업로드</div>
+</div>
+<div class="card">
+  <b>💻 PC 자동연동 설치파일</b>
+  <div class="row" style="margin-top:10px"><a href="/u/{token}/installer"><button type="button">⬇️ 설치파일(.ps1) 다운로드</button></a></div>
+  <div class="hint" style="margin-top:8px">받은 파일 우클릭 → 속성 → <b>차단 해제</b> → 확인, 그다음 우클릭 → <b>PowerShell에서 실행</b>.
+    설치되면 폰 업로드가 4초 내 자동으로 SecureGate 전송 목록에 얹힙니다.</div>
+</div>
+<div style="text-align:center"><a href="/enroll" class="hint">← 다른 사번 발급</a></div>
+</body></html>"""
+
 def render_login_page(error: str = "") -> str:
     err = f'<div class="err" style="margin-top:8px">{_html(error)}</div>' if error else ""
     return f"""<!doctype html><html lang="ko"><head>
@@ -968,26 +1090,31 @@ def render_login_page(error: str = "") -> str:
 
 
 def render_admin_page() -> str:
-    data = load_tokens()
-    active = [(t, i) for t, i in data.items() if not i.get("revoked")]
-    active.sort(key=lambda x: x[1].get("name", ""))
+    active = list_active()
+    active.sort(key=lambda d: (d.get("sabeon") or d.get("name") or ""))
     cards = ""
-    for t, i in active:
+    for d in active:
+        t = d.get("token")
+        if not t:
+            continue
+        label = d.get("sabeon") or d.get("name") or "(이름없음)"
+        created = (d.get("reissued") or d.get("created") or "")[:16].replace("T", " ")
         url = upload_url(t)
         cards += (f'<div class="qcard">'
                   f'<img src="/u/{t}/qr.png" alt="QR">'
-                  f'<div class="qname">{_html(i.get("name",""))}</div>'
+                  f'<div class="qname">{_html(label)}</div>'
+                  f'<div class="hint">{_html(created)}</div>'
                   f'<a class="qurl" href="{url}">{_html(url)}</a>'
                   f'<a class="qurl noprint" style="margin-top:6px;font-weight:600" '
-                  f'href="/admin/installer?token={t}">⬇️ PC 설치파일(.ps1)</a>'
+                  f'href="/u/{t}/installer">⬇️ PC 설치파일(.ps1)</a>'
                   f'<form method="post" action="/admin/revoke" class="noprint" style="margin-top:8px" '
                   f'onsubmit="return confirm(\'이 토큰을 폐기할까요? 해당 사용자는 접근이 차단됩니다.\')">'
                   f'<input type="hidden" name="token" value="{t}">'
                   f'<button class="revoke" type="submit">폐기</button></form>'
                   f'</div>')
     if not active:
-        cards = '<p class="hint">아직 발급된 토큰이 없습니다. 위에서 이름을 입력해 발급하세요.</p>'
-    preset_value = _html(",".join(f"{t}={i.get('name','')}" for t, i in active))
+        cards = '<p class="hint">아직 발급된 토큰이 없습니다. 사용자가 /enroll 에서 사번으로 발급하거나, 위에서 이름으로 발급하세요.</p>'
+    preset_value = _html(",".join(f"{d.get('token','')}={d.get('name','')}" for d in active if d.get("token")))
     return f"""<!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>관리 콘솔</title>{CSS}
@@ -1106,21 +1233,21 @@ def _cli():
             print("  (PIN 설정됨 — REQUIRE_PIN=true 일 때 적용)")
 
     elif args.cmd == "list":
-        data = load_tokens()
-        if not data:
+        docs = store.all()
+        if not docs:
             print("발급된 토큰 없음.")
             return
-        for t, i in data.items():
+        for i in docs:
+            t = i.get("token", "")
             state = "폐기됨" if i.get("revoked") else "활성"
-            pin = "PIN" if i.get("pin") else "-"
-            print(f"[{state}] {i.get('name','')}  {pin}  {t}")
+            print(f"[{state}] {i.get('sabeon') or i.get('name','')}  {t}")
             print(f"         {upload_url(t)}")
 
     elif args.cmd == "revoke":
         print("폐기 완료." if revoke_token(args.token) else "해당 토큰 없음.")
 
     elif args.cmd == "qr":
-        info = load_tokens().get(args.token)
+        info = store.by_token(args.token)
         if not info:
             print("해당 토큰 없음.")
             return
