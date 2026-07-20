@@ -794,6 +794,11 @@ def render_desktop_download_page(token: str, info: dict) -> str:
     </div>
   </div>
   <div class="hint" id="folderStatus" style="margin-top:8px">폴더 미연결 — 다운로드는 브라우저 기본 폴더로 저장됩니다.</div>
+  <label class="row" id="autoPollWrap" style="gap:6px; margin-top:10px; display:none">
+    <input type="checkbox" id="autopoll"> <b>🔄 자동 받기</b>
+    <span class="hint">켜두면 새 사진이 올라오는 대로 연결된 폴더에 자동 저장(이 탭을 열어두세요)</span>
+  </label>
+  <div class="hint" id="autoStatus" style="margin-top:4px"></div>
 </div>
 
 <div class="card">
@@ -831,7 +836,46 @@ $('#connect').onclick = async () => {{
     dirHandle = await window.showDirectoryPicker({{ mode: 'readwrite' }});
     $('#folderStatus').innerHTML = '✅ 연결됨: <b>' + dirHandle.name + '</b> — 다운로드가 이 폴더로 바로 저장됩니다.';
     $('#autoWrap').style.display = 'inline';
+    $('#autoPollWrap').style.display = 'flex';
   }} catch (e) {{ /* 사용자가 취소 */ }}
+}};
+
+// 🔄 자동 받기: 연결된 폴더가 있으면 주기적으로 서버를 확인해 새 파일을 폴더에 저장 + 서버 삭제
+let autoTimer = null, autoBusy = false, autoCount = 0;
+const POLL_MS = 4000;
+async function autoTick() {{
+  if (autoBusy || !dirHandle) return;
+  autoBusy = true;
+  try {{
+    const r = await fetch('/u/' + token + '/list');
+    if (r.ok) {{
+      const j = await r.json();
+      for (const f of (j.files || [])) {{
+        const url = '/u/' + token + '/file/' + encodeURIComponent(f.name);
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        const fh = await dirHandle.getFileHandle(f.name, {{ create: true }});
+        const w = await fh.createWritable(); await w.write(blob); await w.close();
+        if (DELETE_ON_DL) {{ try {{ await fetch(url, {{ method: 'DELETE' }}); }} catch (e) {{}} }}
+        autoCount++;
+        $('#autoStatus').innerHTML = '<span class="ok">🔄 자동 받기 중 — ' + autoCount + '개 저장됨</span> (마지막: ' + f.name + ')';
+      }}
+    }}
+  }} catch (e) {{ $('#autoStatus').innerHTML = '<span class="err">자동 받기 오류: ' + e + '</span>'; }}
+  finally {{ autoBusy = false; }}
+}}
+$('#autopoll').onchange = e => {{
+  if (e.target.checked) {{
+    if (!dirHandle) {{ alert('먼저 SecureGate 폴더를 연결하세요.'); e.target.checked = false; return; }}
+    $('#autoStatus').innerHTML = '<span class="ok">🔄 자동 받기 켜짐</span> — 새 사진을 감시 중... (이 탭을 열어두세요)';
+    autoTick();
+    autoTimer = setInterval(autoTick, POLL_MS);
+  }} else {{
+    if (autoTimer) clearInterval(autoTimer);
+    autoTimer = null;
+    $('#autoStatus').textContent = '자동 받기 꺼짐';
+  }}
 }};
 
 async function saveBlob(blob, name) {{
