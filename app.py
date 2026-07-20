@@ -1056,31 +1056,23 @@ def render_pin_page(token: str, error: str = "") -> str:
 
 
 def render_enroll_page(error: str = "") -> str:
-    err = f'<div class="err" style="margin-top:8px">{_html(error)}</div>' if error else ""
-    code_field = ('<input type="password" name="code" placeholder="가입코드" '
-                  'style="width:100%;padding:12px;font-size:1rem;border-radius:10px;border:1px solid #8886;'
-                  'background:transparent;color:inherit;margin-bottom:10px">') if ENROLL_KEY else ""
     return f"""<!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>토큰 발급</title>{CSS}</head><body>
-<h1>🎫 토큰 발급</h1>
-<div class="sub">사번을 입력하면 개인 업로드 QR과 PC 설치파일이 발급됩니다.</div>
-<div class="card">
-  <form method="post" action="/enroll">
-    {code_field}
-    <input name="sabeon" maxlength="5" autocomplete="off" autofocus required placeholder="사번 5글자 (영문/숫자)"
-      style="width:100%;padding:12px;font-size:1.15rem;letter-spacing:.15em;text-align:center;border-radius:10px;border:1px solid #8886;background:transparent;color:inherit">
-    <div class="row" style="margin-top:12px"><button type="submit">발급 / 재발급</button></div>
-    {err}
-  </form>
-  <div class="hint" style="margin-top:10px">사번마다 <b>고유 토큰 하나</b>. 이미 발급받은 사번이면 <b>그 토큰을 그대로</b> 불러옵니다.</div>
+<title>SecureGate 사진·문서 자동전송</title>{CSS}</head><body style="text-align:center">
+<h1 style="margin-top:24px">📷 SecureGate 사진·문서 자동전송</h1>
+<div class="sub">PC에 앱을 설치하면 앱에서 사번 입력·QR 확인·자동전송이 모두 됩니다.</div>
+<div class="card" style="padding:30px 20px">
+  <a href="/download/setup.ps1">
+    <button type="button" style="font-size:1.35rem; padding:22px 44px; border-radius:16px">⬇️ 설치파일 다운로드</button>
+  </a>
+  <div class="hint" style="margin-top:20px; text-align:left; display:inline-block; line-height:1.8">
+    <b>설치 방법</b><br>
+    1. 받은 <code>SecureGate-Setup.ps1</code> 우클릭 → <b>속성</b> → 하단 <b>차단 해제</b> 체크 → 확인<br>
+    2. 우클릭 → <b>PowerShell에서 실행</b><br>
+    3. 뜨는 앱 창에서 <b>사번 5글자 입력 → [발급/등록]</b> → QR 확인
+  </div>
 </div>
-<div class="card">
-  <b>💻 PC 프로그램(권장)</b>
-  <div class="hint" style="margin:6px 0 8px">PC에 앱을 설치하면 <b>앱 안에서 사번 입력·QR 확인·자동전송</b>이 다 됩니다(웹에서 발급 안 해도 됨).</div>
-  <div class="row"><a href="/download/setup.ps1"><button type="button">⬇️ PC 앱 설치파일(.ps1) 다운로드</button></a></div>
-  <div class="hint" style="margin-top:8px">받은 파일 우클릭 → 속성 → <b>차단 해제</b> → 확인, 그다음 우클릭 → <b>PowerShell에서 실행</b>.</div>
-</div></body></html>"""
+</body></html>"""
 
 def render_enroll_result(sabeon: str, token: str, existed: bool) -> str:
     url = upload_url(token)
