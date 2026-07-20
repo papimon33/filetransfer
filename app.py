@@ -193,13 +193,16 @@ def issue_token(name: str, pin: str | None = None) -> str:
     (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
     return token
 
-def issue_for_sabeon(sabeon: str):
-    """사번 기반 발급. 반환 (token, reissued:bool). 이미 있으면 새 토큰으로 재발급."""
+def enroll_sabeon(sabeon: str):
+    """사번 기반. 사번마다 고유 토큰. 이미 있으면 '그 토큰'을 그대로 반환(활성화),
+    없으면 새로 발급. 반환 (token, existed:bool)."""
+    doc = store.by_sabeon(sabeon)
+    if doc and doc.get("token"):
+        if doc.get("revoked"):
+            store.set_token(sabeon, doc["token"])   # 같은 토큰 유지하며 재활성화
+        (UPLOAD_DIR / doc["token"]).mkdir(parents=True, exist_ok=True)
+        return doc["token"], True
     token = secrets.token_urlsafe(24)
-    if store.by_sabeon(sabeon):
-        store.set_token(sabeon, token)
-        (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
-        return token, True
     store.insert({"sabeon": sabeon, "name": sabeon, "token": token,
                   "created": now_iso(), "revoked": False, "pin": None})
     (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
@@ -468,8 +471,19 @@ def enroll_submit(sabeon: str = Form(...), code: str = Form("")):
         return HTMLResponse(render_enroll_page("가입코드가 올바르지 않습니다."), status_code=401)
     if not _valid_sabeon(sb):
         return HTMLResponse(render_enroll_page("사번은 영문/숫자 5글자여야 합니다."), status_code=400)
-    token, reissued = issue_for_sabeon(sb)
-    return HTMLResponse(render_enroll_result(sb, token, reissued))
+    token, existed = enroll_sabeon(sb)
+    return HTMLResponse(render_enroll_result(sb, token, existed))
+
+@app.post("/api/enroll")
+def api_enroll(sabeon: str = Form(...), code: str = Form("")):
+    """GUI 앱용 JSON 발급 API. 사번 → 고유 토큰(있으면 그대로)."""
+    sb = (sabeon or "").strip()
+    if ENROLL_KEY and not secrets.compare_digest(code or "", ENROLL_KEY):
+        return JSONResponse({"ok": False, "error": "가입코드 오류"}, status_code=401)
+    if not _valid_sabeon(sb):
+        return JSONResponse({"ok": False, "error": "사번은 영문/숫자 5글자"}, status_code=400)
+    token, existed = enroll_sabeon(sb)
+    return {"ok": True, "token": token, "existed": existed, "url": upload_url(token)}
 
 @app.get("/u/{token}/installer")
 def user_installer(token: str):
@@ -686,20 +700,26 @@ def download_agent():
         raise HTTPException(status_code=404, detail="agent not found")
     return FileResponse(AGENT_PATH, media_type="text/plain", filename="SecureGateSync.ps1")
 
-INSTALLER_TEMPLATE = BASE_DIR / "agent" / "Install-SecureGateSync.ps1"
-AGENT_CS_PATH      = BASE_DIR / "agent" / "SecureGateSyncAgent.cs"
+INSTALLER_TEMPLATE = BASE_DIR / "agent" / "Install-SecureGateSyncUI.ps1"
+AGENT_CS_PATH      = BASE_DIR / "agent" / "SecureGateSyncUI.cs"
 
-def build_installer_ps1(server: str, token: str) -> str:
-    """개인별 설치 .ps1 = 설치 템플릿에 서버/토큰 주입 + C# 에이전트 소스 삽입.
-    실행 시 로컬에서 csc로 컴파일 → 설정 → 시작프로그램 등록 → 실행.
-    (powershell.exe 는 서버 접속이 막히므로, 네트워크는 컴파일된 exe가 담당.)
-    base64/난독화 없음 → 백신/EDR 오탐 최소화."""
+def build_installer_ps1(server: str, token: str = "") -> str:
+    """설치 .ps1 = GUI 설치 템플릿에 서버(및 선택적 토큰) 주입 + C# GUI 소스 삽입.
+    실행 시 로컬에서 csc로 GUI exe 컴파일 → 바로가기 생성 → 실행. token 비우면 앱에서 사번 입력.
+    (powershell.exe 는 서버 접속이 막히므로 네트워크는 컴파일된 exe가 담당.) base64/난독화 없음."""
     tpl = INSTALLER_TEMPLATE.read_text(encoding="utf-8-sig")
     cs = AGENT_CS_PATH.read_text(encoding="utf-8-sig")
-    # __SERVER__/__TOKEN__ 은 첫 occurrence(할당문)만 치환 → 가드의 -like '*__SERVER__*' 리터럴 보존.
-    tpl = tpl.replace("__SERVER__", server, 1).replace("__TOKEN__", token, 1)
-    tpl = tpl.replace("__CSHARP__", cs)   # 에이전트 소스 삽입(@'...'@ 리터럴 블록 안)
+    # __SERVER__ 는 첫 occurrence(할당문)만 치환 → 가드의 -like '*__SERVER__*' 리터럴 보존.
+    tpl = tpl.replace("__SERVER__", server, 1).replace("__TOKEN__", token or "", 1)
+    tpl = tpl.replace("__CSHARP__", cs)   # GUI 소스 삽입(@'...'@ 리터럴 블록 안)
     return tpl
+
+@app.get("/download/setup.ps1")
+def download_generic_setup():
+    """토큰 없는 범용 GUI 설치파일 — 설치 후 앱에서 사번 입력. 공개."""
+    ps = build_installer_ps1(base_url(), "")
+    return Response(content=ps.encode("utf-8-sig"), media_type="text/plain",
+                    headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.ps1"'})
 
 @app.get("/admin/installer")
 def admin_installer(request: Request, token: str = ""):
@@ -1041,15 +1061,20 @@ def render_enroll_page(error: str = "") -> str:
     <div class="row" style="margin-top:12px"><button type="submit">발급 / 재발급</button></div>
     {err}
   </form>
-  <div class="hint" style="margin-top:10px">이미 발급받은 사번이면 새 토큰으로 <b>재발급</b>됩니다(기존 토큰은 무효).</div>
+  <div class="hint" style="margin-top:10px">사번마다 <b>고유 토큰 하나</b>. 이미 발급받은 사번이면 <b>그 토큰을 그대로</b> 불러옵니다.</div>
+</div>
+<div class="card">
+  <b>💻 PC 프로그램(권장)</b>
+  <div class="hint" style="margin:6px 0 8px">PC에 앱을 설치하면 <b>앱 안에서 사번 입력·QR 확인·자동전송</b>이 다 됩니다(웹에서 발급 안 해도 됨).</div>
+  <div class="row"><a href="/download/setup.ps1"><button type="button">⬇️ PC 앱 설치파일(.ps1) 다운로드</button></a></div>
+  <div class="hint" style="margin-top:8px">받은 파일 우클릭 → 속성 → <b>차단 해제</b> → 확인, 그다음 우클릭 → <b>PowerShell에서 실행</b>.</div>
 </div></body></html>"""
 
-def render_enroll_result(sabeon: str, token: str, reissued: bool) -> str:
+def render_enroll_result(sabeon: str, token: str, existed: bool) -> str:
     url = upload_url(token)
-    warn = ('<div class="card" style="border-color:#dc262688">'
-            '<b class="err">⚠ 이미 발급된 사번이라 재발급했습니다.</b>'
-            '<div class="hint">이전 토큰(및 그 토큰으로 설치된 PC)은 더 이상 동작하지 않습니다. '
-            '아래 새 설치파일로 다시 설치하세요.</div></div>') if reissued else ""
+    warn = ('<div class="card" style="border-color:#16a34a88">'
+            '<b class="ok">✓ 이미 발급된 사번입니다 — 기존 토큰을 그대로 사용합니다.</b>'
+            '<div class="hint">사번마다 토큰은 하나로 고정입니다.</div></div>') if existed else ""
     return f"""<!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>발급 완료 · {_html(sabeon)}</title>{CSS}</head><body>
