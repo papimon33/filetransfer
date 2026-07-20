@@ -50,7 +50,11 @@ $cscArgs = @('/nologo','/target:exe',"/out:$exe",'/r:System.Web.Extensions.dll',
 if (-not (Test-Path $exe)) { Write-Host '에이전트 컴파일 실패.' -ForegroundColor Red; return }
 
 # ── 설정 파일 ────────────────────────────────────────────────────
-$work    = Join-Path $InstallDir 'incoming'
+# 받은 사진을 둘 폴더: AppData 밑은 SecureGate가 '숨김 위치'로 보고 거부하므로 비숨김 경로 사용.
+#   1순위 C:\SecureGateWatch (권한 없으면) 2순위 %USERPROFILE%\SecureGateWatch
+$work = 'C:\SecureGateWatch'
+try { New-Item -ItemType Directory -Force -Path $work -ErrorAction Stop | Out-Null }
+catch { $work = Join-Path $env:USERPROFILE 'SecureGateWatch'; New-Item -ItemType Directory -Force -Path $work | Out-Null }
 $listdir = Join-Path $env:USERPROFILE 'AppData\LocalLow\HANSSAK\RList'
 $log     = Join-Path $InstallDir 'agent.log'
 $conf = @"
