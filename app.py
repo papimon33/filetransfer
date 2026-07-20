@@ -1081,6 +1081,27 @@ def render_pin_page(token: str, error: str = "") -> str:
 </div></body></html>"""
 
 
+INSTALL_CMD = ('$f = Get-ChildItem "$env:USERPROFILE\\Downloads\\SecureGate-Setup*.ps1" | '
+               'Select-Object -Last 1; '
+               'powershell -NoProfile -ExecutionPolicy Bypass -File $f.FullName')
+
+def _install_steps_html() -> str:
+    """어느 PC(ExecutionPolicy/차단 상태 무관)에서든 되는 Bypass 명령 복사-붙여넣기 안내."""
+    return ("""
+    <b>설치 방법</b> <span style="color:#94a3b8">(어느 PC든 이 방법 권장)</span><br>
+    1. 시작 메뉴 → <b>PowerShell</b> 검색 → 실행<br>
+    2. 아래 명령을 <b>붙여넣고 Enter</b> — 다운로드 폴더의 설치파일을 자동 실행합니다:
+    <div style="position:relative;margin:8px 0">
+      <pre id="cmd" style="background:#0f172a;color:#e2e8f0;padding:12px 40px 12px 14px;border-radius:10px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:.82rem;margin:0;text-align:left">"""
+    + _html(INSTALL_CMD) +
+    """</pre>
+      <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(function(){this.textContent='복사됨 ✓'}.bind(this))" style="position:absolute;top:8px;right:8px;font-size:.75rem;padding:4px 10px">복사</button>
+    </div>
+    3. 뜨는 앱 창에서 <b>사번 5글자 입력 → [발급/등록]</b> → QR 확인<br>
+    <span style="color:#94a3b8">※ 이 방법은 "차단 해제"도 필요 없습니다. (다운로드 차단·스크립트 제한을 함께 우회)</span>
+    """)
+
+
 def render_enroll_page(error: str = "") -> str:
     return f"""<!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1091,11 +1112,8 @@ def render_enroll_page(error: str = "") -> str:
   <a href="/download/setup.ps1">
     <button type="button" style="font-size:1.35rem; padding:22px 44px; border-radius:16px">⬇️ 설치파일 다운로드</button>
   </a>
-  <div class="hint" style="margin-top:20px; text-align:left; display:inline-block; line-height:1.8">
-    <b>설치 방법</b><br>
-    1. 받은 <code>SecureGate-Setup.ps1</code> 우클릭 → <b>속성</b> → 하단 <b>차단 해제</b> 체크 → 확인<br>
-    2. 우클릭 → <b>PowerShell에서 실행</b><br>
-    3. 뜨는 앱 창에서 <b>사번 5글자 입력 → [발급/등록]</b> → QR 확인
+  <div class="hint" style="margin-top:20px; text-align:left; display:inline-block; line-height:1.8; max-width:520px">
+    {_install_steps_html()}
   </div>
 </div>
 <div class="hint" style="margin-top:16px; color:#94a3b8">버전 v{APP_VERSION} · 업데이트 {BUILD_LABEL}</div>
@@ -1121,8 +1139,10 @@ def render_enroll_result(sabeon: str, token: str, existed: bool) -> str:
 <div class="card">
   <b>💻 PC 자동연동 설치파일</b>
   <div class="row" style="margin-top:10px"><a href="/u/{token}/installer"><button type="button">⬇️ 설치파일(.ps1) 다운로드</button></a></div>
-  <div class="hint" style="margin-top:8px">받은 파일 우클릭 → 속성 → <b>차단 해제</b> → 확인, 그다음 우클릭 → <b>PowerShell에서 실행</b>.
-    설치되면 폰 업로드가 4초 내 자동으로 SecureGate 전송 목록에 얹힙니다.</div>
+  <div class="hint" style="margin-top:8px; line-height:1.8">
+    {_install_steps_html()}
+    <br><span style="color:#94a3b8">설치되면 폰 업로드가 4초 내 자동으로 SecureGate 전송 목록에 얹힙니다.</span>
+  </div>
 </div>
 <div style="text-align:center"><a href="/enroll" class="hint">← 다른 사번 발급</a></div>
 </body></html>"""
