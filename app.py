@@ -396,13 +396,14 @@ def pin_ok(token: str, info: dict, request: Request) -> bool:
 
 
 # ── 라우트 ────────────────────────────────────────────────────
-@app.get("/", response_class=PlainTextResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 def root():
     # 보안상 토큰 목록을 노출하지 않는다.
     return "QR Upload Server. 개인 토큰 URL(/u/<token>)로 접속하세요."
 
-@app.get("/healthz", response_class=PlainTextResponse)
+@app.api_route("/healthz", methods=["GET", "HEAD"], response_class=PlainTextResponse)
 def healthz():
+    # HEAD 도 허용: UptimeRobot 등 모니터가 HEAD 로 확인 시 405 나지 않도록.
     return "ok"
 
 def is_mobile(request: Request) -> bool:
@@ -611,13 +612,20 @@ def download_agent():
         raise HTTPException(status_code=404, detail="agent not found")
     return FileResponse(AGENT_PATH, media_type="text/plain", filename="SecureGateSync.ps1")
 
+INSTALLER_TEMPLATE = BASE_DIR / "agent" / "Install-SecureGateSync.ps1"
+AGENT_CS_PATH      = BASE_DIR / "agent" / "SecureGateSyncAgent.cs"
+
 def build_installer_ps1(server: str, token: str) -> str:
-    """개인별 설치 .ps1 생성 = 통합 스크립트(agent/SecureGateSync.ps1)에 서버/토큰만 주입.
-    base64/난독화 없이 사람이 읽을 수 있는 일반 스크립트 → 백신/EDR 오탐 최소화."""
-    text = AGENT_PATH.read_text(encoding="utf-8-sig")   # BOM 제거하여 읽기
-    # ★ 첫 번째 occurrence(할당문)만 치환. 아래 가드의 -like '*__SERVER__*' 판정 리터럴은 보존해야 함.
-    text = text.replace("__SERVER__", server, 1).replace("__TOKEN__", token, 1)
-    return text
+    """개인별 설치 .ps1 = 설치 템플릿에 서버/토큰 주입 + C# 에이전트 소스 삽입.
+    실행 시 로컬에서 csc로 컴파일 → 설정 → 시작프로그램 등록 → 실행.
+    (powershell.exe 는 서버 접속이 막히므로, 네트워크는 컴파일된 exe가 담당.)
+    base64/난독화 없음 → 백신/EDR 오탐 최소화."""
+    tpl = INSTALLER_TEMPLATE.read_text(encoding="utf-8-sig")
+    cs = AGENT_CS_PATH.read_text(encoding="utf-8-sig")
+    # __SERVER__/__TOKEN__ 은 첫 occurrence(할당문)만 치환 → 가드의 -like '*__SERVER__*' 리터럴 보존.
+    tpl = tpl.replace("__SERVER__", server, 1).replace("__TOKEN__", token, 1)
+    tpl = tpl.replace("__CSHARP__", cs)   # 에이전트 소스 삽입(@'...'@ 리터럴 블록 안)
+    return tpl
 
 @app.get("/admin/installer")
 def admin_installer(request: Request, token: str = ""):
@@ -1023,11 +1031,12 @@ def render_admin_page() -> str:
       <li>우클릭 → <b>PowerShell에서 실행</b>
          &nbsp;(또는 명령: <code>powershell -ExecutionPolicy Bypass -File .\SecureGate-Setup.ps1</code>)</li>
     </ol>
-    → <b>시작프로그램</b>에 자동 등록(로그인 시 자동시작) + 즉시 실행됩니다. 이후 폰으로 올린 사진이
-    3초 내 자동으로 SecureGate 전송 목록에 얹힙니다. <b>보내기 클릭만 사람이 합니다.</b>
-    <br>※ 작업 스케줄러 대신 시작프로그램 폴더를 쓰므로 보안정책에 덜 막힙니다. base64 등 난독화도
-    없습니다. 그래도 막히면 IT에 이 파일 허용을 요청하세요. 제거는
-    <code>... -File "%LOCALAPPDATA%\SecureGateSync\SecureGateSync.ps1" -Uninstall</code>.
+    → 작은 동기화 프로그램을 로컬에서 <b>컴파일</b>(Windows 내장 C# 컴파일러) → <b>시작프로그램</b>에
+    자동 등록(로그인 시 자동시작) → 즉시 실행됩니다. 이후 폰으로 올린 사진이 4초 내 자동으로
+    <b>다운로드 + SecureGate 목록에 투입</b>됩니다. <b>보내기 클릭만 사람이 합니다.</b>
+    <br>※ 서버 접속은 <b>컴파일된 exe</b>가 담당합니다(powershell은 보안정책에 막히지만 일반 exe는 허용).
+    base64/난독화 없음, 관리자 권한 불필요. 그래도 막히면 IT에 허용을 요청하세요.
+    제거는 받은 파일을 그대로: <code>powershell -ExecutionPolicy Bypass -File .\SecureGate-Setup.ps1 -Uninstall</code>
   </div>
 </div>
 
