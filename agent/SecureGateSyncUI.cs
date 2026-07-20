@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -106,8 +107,10 @@ public class SyncUI : Form {
     }
 
     // ── UI ──
+    Icon appIcon;
     void BuildUi() {
         Text = "SecureGate 사진 자동전송";
+        try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         ClientSize = new Size(420, 470);
@@ -133,7 +136,7 @@ public class SyncUI : Form {
 
         Controls.AddRange(new Control[] { l1, txtSabeon, btnEnroll, lblStatus, picQr, lblQrHint, lblUrl, chkAuto, txtLog });
 
-        tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
+        tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
         var menu = new ContextMenu();
         menu.MenuItems.Add("열기", (s, e) => ShowWindow());
         menu.MenuItems.Add("종료", (s, e) => { running = false; tray.Visible = false; Application.Exit(); });
@@ -143,6 +146,34 @@ public class SyncUI : Form {
         FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; tray.ShowBalloonTip(1500, "SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료하려면 트레이 아이콘 우클릭 → 종료.", ToolTipIcon.Info); } };
     }
     void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
+
+    // 파란 둥근 사각 위에 흰 카메라 — 코드로 그려 .ico 파일 없이 아이콘 생성
+    static Icon MakeAppIcon() {
+        using (var bmp = new Bitmap(32, 32)) {
+            using (var g = Graphics.FromImage(bmp)) {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+                using (var path = RoundRect(new Rectangle(1, 1, 30, 30), 7))
+                using (var b = new SolidBrush(Color.FromArgb(37, 99, 235))) g.FillPath(b, path);
+                using (var b = new SolidBrush(Color.White)) {
+                    g.FillRectangle(b, 6, 12, 20, 13);   // 카메라 몸통
+                    g.FillRectangle(b, 11, 8, 7, 4);     // 뷰파인더 돌출
+                }
+                using (var b = new SolidBrush(Color.FromArgb(37, 99, 235))) g.FillEllipse(b, 12, 14, 8, 8); // 렌즈 테
+                using (var b = new SolidBrush(Color.White)) g.FillEllipse(b, 14, 16, 4, 4);                  // 렌즈 안
+            }
+            return Icon.FromHandle(bmp.GetHicon());
+        }
+    }
+    static GraphicsPath RoundRect(Rectangle r, int rad) {
+        var p = new GraphicsPath(); int d = rad * 2;
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
 
     // 중복 실행 시 두 번째 인스턴스가 보낸 신호를 받아 창을 앞으로
     void StartShowListener() {

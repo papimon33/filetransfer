@@ -9,8 +9,10 @@
 [CmdletBinding()]
 param([switch]$Uninstall)
 
+$Version       = '__VERSION__'   # 설치파일 버전(서버 빌드시각 기준)
 $ServerBaseUrl = '__SERVER__'
 $Token         = '__TOKEN__'   # 비어있을 수 있음(앱에서 사번 입력)
+Write-Host ("SecureGate 자동전송 설치 v{0}" -f $Version) -ForegroundColor Cyan
 
 $InstallDir = Join-Path $env:LOCALAPPDATA 'SecureGateSync'
 $exe        = Join-Path $InstallDir 'SecureGateSyncUI.exe'

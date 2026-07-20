@@ -63,6 +63,27 @@ def _env(name, default=None):
 
 BASE_DIR        = Path(__file__).resolve().parent
 
+# ── 버전: 핵심 소스(app.py + 설치템플릿 + GUI소스)의 최종 수정시각(KST) 기준 ──
+from datetime import timedelta as _timedelta
+_KST = timezone(_timedelta(hours=9))
+def _compute_build_dt():
+    cands = [Path(__file__).resolve(),
+             BASE_DIR / "agent" / "Install-SecureGateSyncUI.ps1",
+             BASE_DIR / "agent" / "SecureGateSyncUI.cs"]
+    mtimes = []
+    for p in cands:
+        try: mtimes.append(p.stat().st_mtime)
+        except Exception: pass
+    ts = max(mtimes) if mtimes else None
+    try:
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
+    except Exception:
+        dt = datetime.now(timezone.utc)
+    return dt.astimezone(_KST)
+_BUILD_DT   = _compute_build_dt()
+APP_VERSION = _BUILD_DT.strftime("%Y.%m.%d")        # 예: 2026.07.20
+BUILD_LABEL = _BUILD_DT.strftime("%Y-%m-%d %H시")    # 설치페이지용: 며칠 몇시까지
+
 def _safe_dir(configured: str, fallback: Path) -> Path:
     """설정 경로에 폴더를 만들어 보고, 권한/부재 등으로 실패하면 fallback 으로 대체.
     (예: Render 무료 플랜에서 디스크 없이 /data 경로를 지정하면 부팅 크래시 → 방어)."""
@@ -714,6 +735,7 @@ def build_installer_ps1(server: str, token: str = "") -> str:
     cs = AGENT_CS_PATH.read_text(encoding="utf-8-sig")
     # __SERVER__ 는 첫 occurrence(할당문)만 치환 → 가드의 -like '*__SERVER__*' 리터럴 보존.
     tpl = tpl.replace("__SERVER__", server, 1).replace("__TOKEN__", token or "", 1)
+    tpl = tpl.replace("__VERSION__", "{0} ({1})".format(APP_VERSION, BUILD_LABEL), 1)
     tpl = tpl.replace("__CSHARP__", cs)   # GUI 소스 삽입(@'...'@ 리터럴 블록 안)
     return tpl
 
@@ -1076,6 +1098,7 @@ def render_enroll_page(error: str = "") -> str:
     3. 뜨는 앱 창에서 <b>사번 5글자 입력 → [발급/등록]</b> → QR 확인
   </div>
 </div>
+<div class="hint" style="margin-top:16px; color:#94a3b8">버전 v{APP_VERSION} · 업데이트 {BUILD_LABEL}</div>
 </body></html>"""
 
 def render_enroll_result(sabeon: str, token: str, existed: bool) -> str:
