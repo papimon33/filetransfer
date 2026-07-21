@@ -387,7 +387,7 @@ public class SyncUI : Form {
             var psi = new ProcessStartInfo(securegate, "F " + paths.Count + " " + lp); psi.UseShellExecute = true;
             Process.Start(psi);
             Log("SecureGate 투입: " + paths.Count + "장");
-            AutoSendWhenReady();
+            AutoSendWhenReady(paths);
         } catch (Exception e) { Log("SecureGate 투입 실패: " + e.Message); }
     }
     // ── SecureGate [파일보내기] 자동 클릭 ───────────────────────────────
@@ -438,8 +438,9 @@ public class SyncUI : Form {
         btn = b; list = lv;
     }
 
-    void AutoSendWhenReady() {
+    void AutoSendWhenReady(List<string> fedPaths) {
         if (!autoSend) return;
+        string fileNames = NameList(fedPaths, 3);
         ThreadPool.QueueUserWorkItem(_ => {
             try {
                 DateTime deadline = DateTime.Now.AddSeconds(autoSendTimeoutSec);
@@ -473,8 +474,10 @@ public class SyncUI : Form {
                             int now = SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
                             if (now < cnt) { accepted = true; break; }
                         }
-                        if (accepted) Notify("✅ 자료전송 완료", cnt + "건을 SecureGate 로 전송했습니다.");
-                        else Notify("자료전송 요청함", cnt + "건 전송을 눌렀습니다. 자료전송 창을 확인하세요.");
+                        if (accepted)
+                            Notify("✅ 자료전송 완료 (" + cnt + "건)", fileNames);
+                        else
+                            Notify("자료전송 요청함 (" + cnt + "건)", fileNames + "\n자료전송 창을 확인하세요.");
                         return;
                     }
                     Thread.Sleep(500);
@@ -526,12 +529,23 @@ public class SyncUI : Form {
         catch { return false; }
     }
 
-    /// 윈도우 알림(트레이 풍선) — UI 스레드로 마샬링
+    /// 윈도우 알림(트레이 풍선) — UI 스레드로 마샬링. 5초 후 사라짐.
     void Notify(string title, string text) {
         Log(title + " — " + text);
         try { BeginInvoke((Action)(() => {
-            try { tray.ShowBalloonTip(6000, title, text, ToolTipIcon.Info); } catch { }
+            try { tray.ShowBalloonTip(5000, title, text, ToolTipIcon.Info); } catch { }
         })); } catch { }
+    }
+
+    /// 알림에 넣을 파일명 목록 — 너무 길지 않게 앞 max개만, 나머지는 "외 N건"
+    static string NameList(List<string> paths, int max) {
+        var sb = new StringBuilder();
+        for (int i = 0; i < paths.Count && i < max; i++) {
+            if (sb.Length > 0) sb.Append(", ");
+            sb.Append(Path.GetFileName(paths[i]));
+        }
+        if (paths.Count > max) sb.Append(" 외 " + (paths.Count - max) + "건");
+        return sb.ToString();
     }
 
     // ── 자동 업데이트(알림 후 확인) ──────────────────────────────────

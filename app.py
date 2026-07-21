@@ -845,6 +845,23 @@ def _fmt_size(n: int) -> str:
         size /= 1024
     return f"{size:.1f}GB"
 
+# 문서 선택용 accept — image/* 를 일부러 넣지 않는다.
+# 안드로이드 선택창은 accept 의 MIME 에 맞는 앱만 띄우므로, 이미지 타입이 없으면
+# 카메라 앱이 목록에서 빠지고 '파일' 계열만 남는다.
+DOC_ACCEPT = ",".join([
+    ".pdf", ".hwp", ".hwpx", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".zip",
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/haansofthwp", "application/x-hwp",
+    "text/plain", "text/csv",
+    "application/zip", "application/x-zip-compressed",
+])
+
 CSS = """
 <style>
   :root { color-scheme: light dark; --blue:#2d6cdf; --bg:#ffffff; }
@@ -913,7 +930,7 @@ def render_mobile_upload_page(token: str, info: dict) -> str:
   </div>
   <input id="cam" type="file" accept="image/*" capture="environment" multiple hidden>
   <input id="gal" type="file" accept="image/*" multiple hidden>
-  <input id="doc" type="file" multiple hidden>
+  <input id="doc" type="file" accept="{DOC_ACCEPT}" multiple hidden>
   <div class="thumbs" id="thumbs"></div>
   <div id="msg"></div>
 </div>
