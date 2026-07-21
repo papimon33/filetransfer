@@ -23,6 +23,9 @@ public class SyncUI : Form {
     volatile string token = "";
     string sabeon = "", dest = "", securegate = "", listdir = "", srcSha = "";
     int intervalMs = 4000;
+    // 받는 폴더에 직접 넣은 파일도 자동 투입(기본 ON)
+    bool watchFolder = true;
+    readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
     bool autoSend = false;
     int autoSendStableSec = 5;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량 등록 대기)
@@ -33,7 +36,7 @@ public class SyncUI : Form {
     Label lblStatus, lblUrl, lblUpdate;
     Button btnUpdate;
     PictureBox picQr;
-    CheckBox chkAuto, chkSend;
+    CheckBox chkAuto, chkSend, chkWatch;
     NotifyIcon tray;
     Thread syncThread;
     volatile bool running = true;
@@ -82,6 +85,7 @@ public class SyncUI : Form {
         BuildUi();
         StartShowListener();
         StartUpdateChecker();
+        StartFolderWatch();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
             LoadQr();
@@ -111,6 +115,7 @@ public class SyncUI : Form {
                     else if (k == "autosend_stable") int.TryParse(v, out autoSendStableSec);
                     else if (k == "autosend_timeout") int.TryParse(v, out autoSendTimeoutSec);
                     else if (k == "srcsha") srcSha = v;
+                    else if (k == "watchfolder") watchFolder = (v == "1" || v.ToLower() == "true");
                 }
         } catch { }
         if (dest == "") dest = "C:\\SecureGateWatch";
@@ -129,6 +134,7 @@ public class SyncUI : Form {
         sb.Append("autosend_stable=").Append(autoSendStableSec).Append("\r\n");
         sb.Append("autosend_timeout=").Append(autoSendTimeoutSec).Append("\r\n");
         sb.Append("srcsha=").Append(srcSha).Append("\r\n");
+        sb.Append("watchfolder=").Append(watchFolder ? "true" : "false").Append("\r\n");
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
     }
 
@@ -139,7 +145,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 538);
+        ClientSize = new Size(420, 560);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -170,15 +176,20 @@ public class SyncUI : Form {
         chkSend.CheckedChanged += (s, e) => { autoSend = chkSend.Checked; SaveConfig();
             Log(autoSend ? "자동보내기 켬" : "자동보내기 끔"); };
 
-        lblUpdate = new Label { Location = new Point(14, 390), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
+        chkWatch = new CheckBox { Text = "받는 폴더에 직접 넣은 파일도 자동 투입", Location = new Point(14, 384), AutoSize = true };
+        chkWatch.Checked = watchFolder;
+        chkWatch.CheckedChanged += (s, e) => { watchFolder = chkWatch.Checked; SaveConfig();
+            Log(watchFolder ? "폴더 감시 켬: " + dest : "폴더 감시 끔"); };
+
+        lblUpdate = new Label { Location = new Point(14, 412), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
                                 TextAlign = ContentAlignment.MiddleLeft, Visible = false };
-        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 386), Size = new Size(136, 26), Visible = false };
+        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 408), Size = new Size(136, 26), Visible = false };
         btnUpdate.Click += (s, e) => ApplyUpdate();
 
-        txtLog = new TextBox { Location = new Point(14, 418), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        txtLog = new TextBox { Location = new Point(14, 440), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
         Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
-                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend,
+                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkWatch,
                                           lblUpdate, btnUpdate, txtLog });
 
         tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
@@ -357,7 +368,9 @@ public class SyncUI : Form {
                 using (var fresp = (HttpWebResponse)fr.GetResponse())
                 using (var ins = fresp.GetResponseStream())
                 using (var fs = new FileStream(part, FileMode.Create, FileAccess.Write)) ins.CopyTo(fs);
-                File.Move(part, final); got.Add(final); Log("저장: " + Path.GetFileName(final));
+                File.Move(part, final); got.Add(final);
+                lock (fedFiles) fedFiles.Add(final);      // 폴더 감시가 중복 투입하지 않도록
+                Log("저장: " + Path.GetFileName(final));
                 try { var dr = (HttpWebRequest)WebRequest.Create(url); dr.Method = "DELETE"; dr.Timeout = 30000; using (var x = (HttpWebResponse)dr.GetResponse()) { } } catch { }
             } catch (Exception e) { Log("다운로드 실패: " + name + " (" + e.Message + ")"); try { if (File.Exists(part)) File.Delete(part); } catch { } }
         }
@@ -451,7 +464,17 @@ public class SyncUI : Form {
                     } else if (cnt > 0 && IsWindowEnabled(btn)
                                && (DateTime.Now - stableSince).TotalSeconds >= autoSendStableSec) {
                         SendMessage(btn, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
-                        Log("자동보내기: [파일보내기] 클릭 완료 — " + cnt + "건");
+                        Log("자동보내기: [파일보내기] 클릭 — " + cnt + "건");
+                        // SecureGate 가 목록을 비우면 접수된 것 → 그때 완료 알림
+                        bool accepted = false;
+                        DateTime until = DateTime.Now.AddSeconds(120);
+                        while (DateTime.Now < until) {
+                            Thread.Sleep(1000);
+                            int now = SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                            if (now < cnt) { accepted = true; break; }
+                        }
+                        if (accepted) Notify("✅ 자료전송 완료", cnt + "건을 SecureGate 로 전송했습니다.");
+                        else Notify("자료전송 요청함", cnt + "건 전송을 눌렀습니다. 자료전송 창을 확인하세요.");
                         return;
                     }
                     Thread.Sleep(500);
@@ -459,6 +482,56 @@ public class SyncUI : Form {
                 Log("자동보내기: 대기 시간 초과(" + autoSendTimeoutSec + "초) → 직접 눌러주세요");
             } catch (Exception e) { Log("자동보내기 오류: " + e.Message + " → 직접 눌러주세요"); }
         });
+    }
+
+    // ── 받는 폴더 직접 감시 ────────────────────────────────────────
+    // 폰 업로드가 아니라 사용자가 직접 폴더에 옮겨넣은 파일도 SecureGate 에 투입한다.
+    // · 앱 시작 시점에 이미 있던 파일은 '처리됨'으로 기준선을 잡아 재시작 때 재전송하지 않음
+    // · 크기가 안정되고 잠금이 풀린 뒤에만 투입(복사 중인 대용량 파일 방지)
+    void StartFolderWatch() {
+        var t = new Thread(() => {
+            try { if (Directory.Exists(dest)) foreach (var f in Directory.GetFiles(dest)) fedFiles.Add(f); }
+            catch { }
+            var sizes = new Dictionary<string, long>();
+            while (running) {
+                try {
+                    if (watchFolder && Directory.Exists(dest)) {
+                        var batch = new List<string>();
+                        foreach (var f in Directory.GetFiles(dest)) {
+                            if (f.EndsWith(".part", StringComparison.OrdinalIgnoreCase)) continue;
+                            lock (fedFiles) { if (fedFiles.Contains(f)) continue; }
+                            long len;
+                            try { len = new FileInfo(f).Length; } catch { continue; }
+                            long prev;
+                            if (!sizes.TryGetValue(f, out prev) || prev != len) { sizes[f] = len; continue; }
+                            if (!IsFileReady(f)) continue;      // 아직 쓰는 중
+                            batch.Add(f);
+                        }
+                        if (batch.Count > 0) {
+                            lock (fedFiles) foreach (var f in batch) fedFiles.Add(f);
+                            foreach (var f in batch) sizes.Remove(f);
+                            Log("폴더에서 새 파일 " + batch.Count + "개 발견 → SecureGate 투입");
+                            Feed(batch);
+                        }
+                    }
+                } catch (Exception e) { Log("폴더 감시 오류: " + e.Message); }
+                Thread.Sleep(3000);
+            }
+        });
+        t.IsBackground = true; t.Start();
+    }
+
+    static bool IsFileReady(string p) {
+        try { using (new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.None)) return true; }
+        catch { return false; }
+    }
+
+    /// 윈도우 알림(트레이 풍선) — UI 스레드로 마샬링
+    void Notify(string title, string text) {
+        Log(title + " — " + text);
+        try { BeginInvoke((Action)(() => {
+            try { tray.ShowBalloonTip(6000, title, text, ToolTipIcon.Info); } catch { }
+        })); } catch { }
     }
 
     // ── 자동 업데이트(알림 후 확인) ──────────────────────────────────
