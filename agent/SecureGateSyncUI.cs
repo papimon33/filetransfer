@@ -23,7 +23,7 @@ public class SyncUI : Form {
     string sabeon = "", dest = "", securegate = "", listdir = "";
     int intervalMs = 4000;
 
-    TextBox txtSabeon, txtLog;
+    TextBox txtSabeon, txtPin, txtLog;
     Button btnEnroll;
     Label lblStatus, lblUrl;
     PictureBox picQr;
@@ -113,28 +113,36 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 470);
+        ClientSize = new Size(420, 486);
         Font = new Font("Malgun Gothic", 9F);
 
-        var l1 = new Label { Text = "사번(5글자):", Location = new Point(14, 18), AutoSize = true };
-        txtSabeon = new TextBox { Location = new Point(100, 15), Size = new Size(120, 24), MaxLength = 5, CharacterCasing = CharacterCasing.Upper };
-        btnEnroll = new Button { Text = "발급 / 등록", Location = new Point(232, 14), Size = new Size(160, 26) };
+        var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
+        txtSabeon = new TextBox { Location = new Point(48, 15), Size = new Size(90, 24), MaxLength = 5, CharacterCasing = CharacterCasing.Upper };
+        var l2 = new Label { Text = "PIN", Location = new Point(148, 18), AutoSize = true };
+        txtPin = new TextBox { Location = new Point(182, 15), Size = new Size(80, 24), MaxLength = 6,
+                               UseSystemPasswordChar = true };
+        btnEnroll = new Button { Text = "발급 / 등록", Location = new Point(272, 14), Size = new Size(120, 26) };
         btnEnroll.Click += (s, e) => DoEnroll();
-        txtSabeon.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { DoEnroll(); e.SuppressKeyPress = true; } };
+        txtSabeon.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { txtPin.Focus(); e.SuppressKeyPress = true; } };
+        txtPin.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { DoEnroll(); e.SuppressKeyPress = true; } };
+        var lblPinHint = new Label { Text = "PIN 숫자 4~6자리 — 최초 등록 시 정한 PIN이어야 내 사번을 쓸 수 있습니다.",
+                                     Location = new Point(14, 44), Size = new Size(392, 18),
+                                     ForeColor = Color.DimGray, Font = new Font("Malgun Gothic", 8F) };
 
-        lblStatus = new Label { Location = new Point(14, 48), Size = new Size(392, 22), ForeColor = Color.DimGray };
+        lblStatus = new Label { Location = new Point(14, 64), Size = new Size(392, 22), ForeColor = Color.DimGray };
 
-        picQr = new PictureBox { Location = new Point(110, 76), Size = new Size(200, 200), SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle };
-        var lblQrHint = new Label { Text = "↑ 폰 카메라로 이 QR을 스캔해 사진 업로드", Location = new Point(14, 280), Size = new Size(392, 20), TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray };
-        lblUrl = new Label { Location = new Point(14, 300), Size = new Size(392, 20), TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.SteelBlue, AutoEllipsis = true };
+        picQr = new PictureBox { Location = new Point(110, 90), Size = new Size(200, 200), SizeMode = PictureBoxSizeMode.Zoom, BorderStyle = BorderStyle.FixedSingle };
+        var lblQrHint = new Label { Text = "↑ 폰 카메라로 이 QR을 스캔해 사진 업로드", Location = new Point(14, 294), Size = new Size(392, 20), TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray };
+        lblUrl = new Label { Location = new Point(14, 314), Size = new Size(392, 20), TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.SteelBlue, AutoEllipsis = true };
 
-        chkAuto = new CheckBox { Text = "로그인 시 자동 시작", Location = new Point(14, 326), AutoSize = true };
+        chkAuto = new CheckBox { Text = "로그인 시 자동 시작", Location = new Point(14, 340), AutoSize = true };
         chkAuto.Checked = File.Exists(StartupLnk());
         chkAuto.CheckedChanged += (s, e) => SetAutostart(chkAuto.Checked);
 
-        txtLog = new TextBox { Location = new Point(14, 352), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        txtLog = new TextBox { Location = new Point(14, 366), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
-        Controls.AddRange(new Control[] { l1, txtSabeon, btnEnroll, lblStatus, picQr, lblQrHint, lblUrl, chkAuto, txtLog });
+        Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
+                                          picQr, lblQrHint, lblUrl, chkAuto, txtLog });
 
         tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
         var menu = new ContextMenu();
@@ -220,11 +228,17 @@ public class SyncUI : Form {
     // ── 발급 ──
     void DoEnroll() {
         string sb = (txtSabeon.Text ?? "").Trim();
+        string pn = (txtPin.Text ?? "").Trim();
         if (sb.Length != 5) { MessageBox.Show("사번은 5글자입니다.", "안내"); return; }
+        bool digits = pn.Length > 0;
+        foreach (char c in pn) if (c < '0' || c > '9') digits = false;
+        if (pn.Length < 4 || pn.Length > 6 || !digits) {
+            MessageBox.Show("PIN은 숫자 4~6자리입니다.\n\n처음 등록하는 사번이면 여기서 정한 PIN이 내 사번의 잠금이 되고,\n이미 등록된 사번이면 그때 정한 PIN을 입력해야 합니다.", "안내"); return;
+        }
         btnEnroll.Enabled = false; SetStatus("발급 요청 중...");
         ThreadPool.QueueUserWorkItem(_ => {
             try {
-                var data = new NameValueCollection(); data["sabeon"] = sb;
+                var data = new NameValueCollection(); data["sabeon"] = sb; data["pin"] = pn;
                 byte[] resp;
                 using (var wc = new WebClient()) resp = wc.UploadValues(server + "/api/enroll", data);
                 var js = new JavaScriptSerializer();
@@ -243,9 +257,21 @@ public class SyncUI : Form {
                 }
             } catch (WebException we) {
                 string msg = we.Message;
-                try { if (we.Response != null) using (var sr = new StreamReader(we.Response.GetResponseStream(), Encoding.UTF8)) msg = sr.ReadToEnd(); } catch { }
+                try {
+                    if (we.Response != null)
+                        using (var sr = new StreamReader(we.Response.GetResponseStream(), Encoding.UTF8)) {
+                            string body = sr.ReadToEnd();
+                            try {   // {"ok":false,"error":"..."} 에서 사람이 읽을 메시지만 추출
+                                var eo = (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject(body);
+                                if (eo != null && eo.ContainsKey("error")) msg = Convert.ToString(eo["error"]);
+                                else msg = body;
+                            } catch { msg = body; }
+                        }
+                } catch { }
                 SetStatus("발급 실패: " + msg);
                 Log("발급 실패: " + msg);
+                string m = msg;
+                try { BeginInvoke((Action)(() => MessageBox.Show(m, "발급 실패"))); } catch { }
             } catch (Exception e) { SetStatus("발급 실패: " + e.Message); Log("발급 실패: " + e.Message); }
             finally { BeginInvoke((Action)(() => btnEnroll.Enabled = true)); }
         });

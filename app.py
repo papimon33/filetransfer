@@ -128,6 +128,8 @@ ALLOWED_EXT     = set(
 )
 
 REQUIRE_PIN     = _env("REQUIRE_PIN", "false").lower() in ("1", "true", "yes", "on")
+# 사번 등록 PIN(개인 잠금). 기본 ON — 남이 사번만 알고 토큰을 가로채는 것을 막음.
+ENROLL_PIN_REQUIRED = _env("ENROLL_PIN_REQUIRED", "true").lower() in ("1", "true", "yes", "on")
 ADMIN_KEY       = _env("ADMIN_KEY", "")        # 관리 콘솔 접근용(로그인 비밀번호로도 사용됨)
 ADMIN_PASSWORD  = _env("ADMIN_PASSWORD", "")   # 관리자 로그인 비밀번호(미설정 시 ADMIN_KEY 사용)
 DELETE_ON_DOWNLOAD = _env("DELETE_ON_DOWNLOAD", "true").lower() in ("1", "true", "yes", "on")
@@ -149,6 +151,10 @@ def now_iso() -> str:
 def hash_pin(token: str, pin: str) -> str:
     return hashlib.sha256(f"{token}:{pin}".encode("utf-8")).hexdigest()
 
+def hash_epin(sabeon: str, pin: str) -> str:
+    """사번 등록용 PIN 해시(업로드 접근용 pin 과 별개)."""
+    return hashlib.sha256(f"epin:{sabeon}:{pin}".encode("utf-8")).hexdigest()
+
 class _MongoStore:
     def __init__(self, uri: str, dbname: str):
         from pymongo import MongoClient, ASCENDING
@@ -160,6 +166,8 @@ class _MongoStore:
     def insert(self, doc):      self._col.insert_one(dict(doc))
     def set_token(self, sabeon, token):
         self._col.update_one({"sabeon": sabeon}, {"$set": {"token": token, "revoked": False, "reissued": now_iso()}})
+    def set_epin(self, sabeon, epin):
+        self._col.update_one({"sabeon": sabeon}, {"$set": {"epin": epin}})
     def revoke(self, token):
         return self._col.update_one({"token": token}, {"$set": {"revoked": True}}).matched_count > 0
     def all(self):              return list(self._col.find({}, {"_id": 0}))
@@ -189,6 +197,11 @@ class _FileStore:
             if d.get("sabeon") == sabeon:
                 d["token"] = token; d["revoked"] = False; d["reissued"] = now_iso()
         self._save(docs)
+    def set_epin(self, sabeon, epin):
+        docs = self._load()
+        for d in docs:
+            if d.get("sabeon") == sabeon: d["epin"] = epin
+        self._save(docs)
     def revoke(self, token):
         docs = self._load(); found = False
         for d in docs:
@@ -217,20 +230,59 @@ def issue_token(name: str, pin: str | None = None) -> str:
     (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
     return token
 
-def enroll_sabeon(sabeon: str):
-    """사번 기반. 사번마다 고유 토큰. 이미 있으면 '그 토큰'을 그대로 반환(활성화),
-    없으면 새로 발급. 반환 (token, existed:bool)."""
+def _valid_epin(p: str) -> bool:
+    return bool(p) and p.isdigit() and 4 <= len(p) <= 6
+
+# PIN 무차별 대입 차단(사번별 실패 횟수/잠금). 프로세스 메모리 기준.
+_epin_fail: dict = {}
+EPIN_MAX_FAIL = 5
+EPIN_LOCK_SEC = 600
+
+def _epin_locked(sabeon: str) -> int:
+    """잠겨 있으면 남은 초, 아니면 0."""
+    cnt, until = _epin_fail.get(sabeon, (0, 0.0))
+    remain = int(until - time.time())
+    return remain if remain > 0 else 0
+
+def _epin_mark_fail(sabeon: str):
+    cnt, until = _epin_fail.get(sabeon, (0, 0.0))
+    cnt += 1
+    _epin_fail[sabeon] = (cnt, time.time() + EPIN_LOCK_SEC if cnt >= EPIN_MAX_FAIL else 0.0)
+
+def enroll_sabeon(sabeon: str, pin: str = ""):
+    """사번마다 고유 토큰 + 개인 PIN 잠금.
+      - 신규 사번: 입력한 PIN으로 잠그며 발급
+      - 기존 사번: 등록된 PIN이 일치해야 그 토큰 반환 (남이 사번만 알고 가로채는 것 방지)
+      - PIN 미설정(구버전) 사번: 이번 PIN으로 최초 잠금(TOFU)
+    반환 (token, existed:bool, error:str)."""
+    pin = (pin or "").strip()
+    if ENROLL_PIN_REQUIRED and not _valid_epin(pin):
+        return None, False, "PIN은 숫자 4~6자리여야 합니다."
+    remain = _epin_locked(sabeon)
+    if remain:
+        return None, True, f"PIN 오류가 많아 잠겼습니다. {remain // 60 + 1}분 후 다시 시도하세요."
+
     doc = store.by_sabeon(sabeon)
     if doc and doc.get("token"):
+        saved = doc.get("epin")
+        if saved:
+            if not secrets.compare_digest(saved, hash_epin(sabeon, pin)):
+                _epin_mark_fail(sabeon)
+                return None, True, "PIN이 일치하지 않습니다. (이미 등록된 사번입니다)"
+        elif ENROLL_PIN_REQUIRED:
+            store.set_epin(sabeon, hash_epin(sabeon, pin))   # 구버전 사번 최초 잠금
+        _epin_fail.pop(sabeon, None)
         if doc.get("revoked"):
             store.set_token(sabeon, doc["token"])   # 같은 토큰 유지하며 재활성화
         (UPLOAD_DIR / doc["token"]).mkdir(parents=True, exist_ok=True)
-        return doc["token"], True
+        return doc["token"], True, ""
+
     token = secrets.token_urlsafe(24)
     store.insert({"sabeon": sabeon, "name": sabeon, "token": token,
-                  "created": now_iso(), "revoked": False, "pin": None})
+                  "created": now_iso(), "revoked": False, "pin": None,
+                  "epin": hash_epin(sabeon, pin) if pin else None})
     (UPLOAD_DIR / token).mkdir(parents=True, exist_ok=True)
-    return token, False
+    return token, False, ""
 
 def revoke_token(token: str) -> bool:
     return store.revoke(token)
@@ -489,24 +541,28 @@ def enroll_page():
     return HTMLResponse(render_enroll_page())
 
 @app.post("/enroll", response_class=HTMLResponse)
-def enroll_submit(sabeon: str = Form(...), code: str = Form("")):
+def enroll_submit(sabeon: str = Form(...), pin: str = Form(""), code: str = Form("")):
     sb = (sabeon or "").strip()
     if ENROLL_KEY and not secrets.compare_digest(code or "", ENROLL_KEY):
         return HTMLResponse(render_enroll_page("가입코드가 올바르지 않습니다."), status_code=401)
     if not _valid_sabeon(sb):
         return HTMLResponse(render_enroll_page("사번은 영문/숫자 5글자여야 합니다."), status_code=400)
-    token, existed = enroll_sabeon(sb)
+    token, existed, err = enroll_sabeon(sb, pin)
+    if err:
+        return HTMLResponse(render_enroll_page(err), status_code=403)
     return HTMLResponse(render_enroll_result(sb, token, existed))
 
 @app.post("/api/enroll")
-def api_enroll(sabeon: str = Form(...), code: str = Form("")):
-    """GUI 앱용 JSON 발급 API. 사번 → 고유 토큰(있으면 그대로)."""
+def api_enroll(sabeon: str = Form(...), pin: str = Form(""), code: str = Form("")):
+    """GUI 앱용 JSON 발급 API. 사번 + 개인 PIN → 고유 토큰(있으면 PIN 일치 시 그대로)."""
     sb = (sabeon or "").strip()
     if ENROLL_KEY and not secrets.compare_digest(code or "", ENROLL_KEY):
         return JSONResponse({"ok": False, "error": "가입코드 오류"}, status_code=401)
     if not _valid_sabeon(sb):
         return JSONResponse({"ok": False, "error": "사번은 영문/숫자 5글자"}, status_code=400)
-    token, existed = enroll_sabeon(sb)
+    token, existed, err = enroll_sabeon(sb, pin)
+    if err:
+        return JSONResponse({"ok": False, "error": err, "existed": existed}, status_code=403)
     return {"ok": True, "token": token, "existed": existed, "url": upload_url(token)}
 
 @app.get("/u/{token}/installer")

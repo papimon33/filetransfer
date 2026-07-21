@@ -17,6 +17,8 @@ services:
         value: filetransfer
       - key: ENROLL_KEY                # (선택) 사번 자가발급에 가입코드 요구. 비우면 사번만으로 발급.
         sync: false
+      - key: ENROLL_PIN_REQUIRED       # 사번 등록 시 개인 PIN(4~6자리) 요구 — 사번 도용 방지. 권장 true
+        value: "true"
       - key: PRESET_TOKENS             # (선택) 기존 토큰 마이그레이션용 "토큰=이름". Mongo 쓰면 대개 불필요
         sync: false
       - key: MAX_FILE_MB
