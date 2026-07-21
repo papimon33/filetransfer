@@ -802,6 +802,24 @@ def download_generic_setup():
     return Response(content=ps.encode("utf-8-sig"), media_type="text/plain",
                     headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.ps1"'})
 
+@app.get("/agent/version")
+def agent_version():
+    """GUI 앱 자동업데이트용 버전 정보.
+    비교 기준은 소스 내용의 sha256 — 재배포로 파일 mtime 만 바뀌어도 오탐하지 않음."""
+    try:
+        src = AGENT_CS_PATH.read_bytes()
+    except Exception:
+        raise HTTPException(status_code=404, detail="agent source not found")
+    return {"version": APP_VERSION, "built": BUILD_LABEL,
+            "sha256": hashlib.sha256(src).hexdigest()}
+
+@app.get("/agent/source.cs")
+def agent_source():
+    """GUI 앱 소스(자동업데이트 시 앱이 받아서 로컬 컴파일). 비밀 아님 → 공개."""
+    if not AGENT_CS_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return Response(content=AGENT_CS_PATH.read_bytes(), media_type="text/plain; charset=utf-8")
+
 @app.get("/admin/installer")
 def admin_installer(request: Request, token: str = ""):
     """개인별 설치 .ps1 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출(로그인 필요)."""

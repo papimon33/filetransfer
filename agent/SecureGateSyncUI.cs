@@ -21,7 +21,7 @@ public class SyncUI : Form {
     string cfgPath, logPath;
     string server = "https://qr-upload-server.onrender.com";
     volatile string token = "";
-    string sabeon = "", dest = "", securegate = "", listdir = "";
+    string sabeon = "", dest = "", securegate = "", listdir = "", srcSha = "";
     int intervalMs = 4000;
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
     bool autoSend = false;
@@ -30,7 +30,8 @@ public class SyncUI : Form {
 
     TextBox txtSabeon, txtPin, txtLog;
     Button btnEnroll;
-    Label lblStatus, lblUrl;
+    Label lblStatus, lblUrl, lblUpdate;
+    Button btnUpdate;
     PictureBox picQr;
     CheckBox chkAuto, chkSend;
     NotifyIcon tray;
@@ -44,8 +45,21 @@ public class SyncUI : Form {
 
     [STAThread]
     static void Main(string[] args) {
+        bool startTray = false, afterUpdate = false;
+        foreach (var a in args) {
+            if (a == "/tray") startTray = true;
+            if (a == "/updated") afterUpdate = true;
+        }
         bool createdNew;
         _mutex = new Mutex(true, MUTEX_NAME, out createdNew);
+        if (!createdNew && afterUpdate) {
+            // 업데이트 직후 재시작 — 이전 프로세스가 완전히 끝날 때까지 최대 10초 대기
+            for (int i = 0; i < 40 && !createdNew; i++) {
+                Thread.Sleep(250);
+                try { _mutex.Close(); } catch { }
+                _mutex = new Mutex(true, MUTEX_NAME, out createdNew);
+            }
+        }
         if (!createdNew) {
             // 이미 실행 중 — 기존 인스턴스에게 "창 보이기" 신호만 보내고 종료
             try { EventWaitHandle.OpenExisting(EVENT_NAME).Set(); } catch { }
@@ -55,8 +69,6 @@ public class SyncUI : Form {
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        bool startTray = false;
-        foreach (var a in args) if (a == "/tray") startTray = true;
         Application.Run(new SyncUI(startTray));
         GC.KeepAlive(_mutex);
     }
@@ -69,6 +81,7 @@ public class SyncUI : Form {
         LoadConfig();
         BuildUi();
         StartShowListener();
+        StartUpdateChecker();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
             LoadQr();
@@ -97,6 +110,7 @@ public class SyncUI : Form {
                     else if (k == "autosend") autoSend = (v == "1" || v.ToLower() == "true");
                     else if (k == "autosend_stable") int.TryParse(v, out autoSendStableSec);
                     else if (k == "autosend_timeout") int.TryParse(v, out autoSendTimeoutSec);
+                    else if (k == "srcsha") srcSha = v;
                 }
         } catch { }
         if (dest == "") dest = "C:\\SecureGateWatch";
@@ -114,6 +128,7 @@ public class SyncUI : Form {
         sb.Append("autosend=").Append(autoSend ? "true" : "false").Append("\r\n");
         sb.Append("autosend_stable=").Append(autoSendStableSec).Append("\r\n");
         sb.Append("autosend_timeout=").Append(autoSendTimeoutSec).Append("\r\n");
+        sb.Append("srcsha=").Append(srcSha).Append("\r\n");
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
     }
 
@@ -124,7 +139,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 508);
+        ClientSize = new Size(420, 538);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -155,10 +170,16 @@ public class SyncUI : Form {
         chkSend.CheckedChanged += (s, e) => { autoSend = chkSend.Checked; SaveConfig();
             Log(autoSend ? "자동보내기 켬" : "자동보내기 끔"); };
 
-        txtLog = new TextBox { Location = new Point(14, 388), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        lblUpdate = new Label { Location = new Point(14, 390), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
+                                TextAlign = ContentAlignment.MiddleLeft, Visible = false };
+        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 386), Size = new Size(136, 26), Visible = false };
+        btnUpdate.Click += (s, e) => ApplyUpdate();
+
+        txtLog = new TextBox { Location = new Point(14, 418), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
         Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
-                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, txtLog });
+                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend,
+                                          lblUpdate, btnUpdate, txtLog });
 
         tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
         var menu = new ContextMenu();
@@ -437,6 +458,108 @@ public class SyncUI : Form {
                 }
                 Log("자동보내기: 대기 시간 초과(" + autoSendTimeoutSec + "초) → 직접 눌러주세요");
             } catch (Exception e) { Log("자동보내기 오류: " + e.Message + " → 직접 눌러주세요"); }
+        });
+    }
+
+    // ── 자동 업데이트(알림 후 확인) ──────────────────────────────────
+    // 서버의 GUI 소스 sha256 을 주기적으로 확인 → 다르면 알림만 띄우고,
+    // 사용자가 [지금 업데이트] 를 누르면 소스를 받아 로컬 컴파일 후 교체·재시작.
+    // (완성된 exe 를 내려받지 않으므로 설치 때와 동일하게 보안SW 마찰이 적음)
+    volatile bool updateBusy = false;
+    string newSha = "", newVer = "";
+
+    void StartUpdateChecker() {
+        var t = new Thread(() => {
+            Thread.Sleep(15000);                       // 시작 직후 1회
+            while (running) {
+                CheckUpdate(true);
+                for (int i = 0; i < 360 && running; i++) Thread.Sleep(60000);   // 이후 6시간마다
+            }
+        });
+        t.IsBackground = true; t.Start();
+    }
+
+    void CheckUpdate(bool silent) {
+        ThreadPool.QueueUserWorkItem(_ => {
+            try {
+                string body;
+                using (var wc = new WebClient()) { wc.Encoding = Encoding.UTF8; body = wc.DownloadString(server + "/agent/version"); }
+                var o = new JavaScriptSerializer().DeserializeObject(body) as Dictionary<string, object>;
+                if (o == null || !o.ContainsKey("sha256")) return;
+                string sha = Convert.ToString(o["sha256"]);
+                string ver = o.ContainsKey("version") ? Convert.ToString(o["version"]) : "";
+                if (string.IsNullOrEmpty(srcSha)) {     // 방금 설치 = 지금 소스가 기준
+                    srcSha = sha; SaveConfig();
+                    if (!silent) Log("최신 버전입니다 (v" + ver + ")");
+                    return;
+                }
+                if (sha != srcSha) {
+                    newSha = sha; newVer = ver;
+                    Log("새 버전 발견: v" + ver + " — [지금 업데이트] 를 누르세요");
+                    try { BeginInvoke((Action)(() => {
+                        lblUpdate.Text = "🔔 새 버전 v" + ver + " 사용 가능";
+                        lblUpdate.Visible = true; btnUpdate.Visible = true; btnUpdate.Enabled = true;
+                    })); } catch { }
+                    try { tray.ShowBalloonTip(4000, "SecureGate 자동전송",
+                          "새 버전 v" + ver + " 이 있습니다. 앱을 열어 [지금 업데이트]를 누르세요.", ToolTipIcon.Info); } catch { }
+                } else if (!silent) Log("최신 버전입니다 (v" + ver + ")");
+            } catch (Exception e) { if (!silent) Log("업데이트 확인 실패: " + e.Message); }
+        });
+    }
+
+    void ApplyUpdate() {
+        if (updateBusy) return;
+        updateBusy = true;
+        btnUpdate.Enabled = false;
+        SetStatus("업데이트 중... (소스 받아 컴파일)");
+        ThreadPool.QueueUserWorkItem(_ => {
+            string exe    = Application.ExecutablePath;
+            string dir    = Path.GetDirectoryName(exe);
+            string newCs  = Path.Combine(dir, "SecureGateSyncUI.new.cs");
+            string newExe = Path.Combine(dir, "SecureGateSyncUI.new.exe");
+            string oldExe = Path.Combine(dir, "SecureGateSyncUI.old.exe");
+            try {
+                string src;
+                using (var wc = new WebClient()) { wc.Encoding = Encoding.UTF8; src = wc.DownloadString(server + "/agent/source.cs"); }
+                if (src.Length < 1000) throw new Exception("소스가 비정상적으로 짧음");
+                File.WriteAllText(newCs, src, new UTF8Encoding(true));
+
+                string win = Environment.GetEnvironmentVariable("WINDIR");
+                string csc = Path.Combine(win, @"Microsoft.NET\Framework64\v4.0.30319\csc.exe");
+                if (!File.Exists(csc)) csc = Path.Combine(win, @"Microsoft.NET\Framework\v4.0.30319\csc.exe");
+                if (!File.Exists(csc)) throw new Exception("csc.exe 를 찾을 수 없음");
+
+                string ico = Path.Combine(dir, "app.ico");
+                string args = "/nologo /target:winexe \"/out:" + newExe + "\""
+                            + " /r:System.Windows.Forms.dll /r:System.Drawing.dll"
+                            + " /r:System.Web.Extensions.dll /r:Microsoft.CSharp.dll"
+                            + (File.Exists(ico) ? " \"/win32icon:" + ico + "\"" : "")
+                            + " \"" + newCs + "\"";
+                var psi = new ProcessStartInfo(csc, args);
+                psi.UseShellExecute = false; psi.CreateNoWindow = true;
+                using (var pc = Process.Start(psi)) pc.WaitForExit(180000);
+                if (!File.Exists(newExe)) throw new Exception("컴파일 실패 — 기존 버전 유지");
+
+                // 실행 중인 exe 는 덮어쓸 수 없지만 이름 변경은 가능
+                if (File.Exists(oldExe)) { try { File.Delete(oldExe); } catch { } }
+                File.Move(exe, oldExe);
+                try { File.Move(newExe, exe); }
+                catch { File.Move(oldExe, exe); throw; }      // 실패 시 롤백
+
+                srcSha = newSha; SaveConfig();
+                Log("업데이트 완료 (v" + newVer + ") — 재시작합니다");
+                try { Process.Start(exe, "/updated"); } catch { }
+                running = false;
+                try { BeginInvoke((Action)(() => { tray.Visible = false; Application.Exit(); })); } catch { }
+            } catch (Exception e) {
+                Log("업데이트 실패: " + e.Message + " — 기존 버전으로 계속 실행합니다");
+                SetStatus("업데이트 실패 — 기존 버전 유지");
+                try { if (File.Exists(newExe)) File.Delete(newExe); } catch { }
+                try { BeginInvoke((Action)(() => btnUpdate.Enabled = true)); } catch { }
+            } finally {
+                updateBusy = false;
+                try { if (File.Exists(newCs)) File.Delete(newCs); } catch { }
+            }
         });
     }
 
