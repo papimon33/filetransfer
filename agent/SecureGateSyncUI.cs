@@ -11,6 +11,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -22,12 +23,16 @@ public class SyncUI : Form {
     volatile string token = "";
     string sabeon = "", dest = "", securegate = "", listdir = "";
     int intervalMs = 4000;
+    // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
+    bool autoSend = false;
+    int autoSendStableSec = 5;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량 등록 대기)
+    int autoSendTimeoutSec = 900;   // 대용량 감안한 최대 대기
 
     TextBox txtSabeon, txtPin, txtLog;
     Button btnEnroll;
     Label lblStatus, lblUrl;
     PictureBox picQr;
-    CheckBox chkAuto;
+    CheckBox chkAuto, chkSend;
     NotifyIcon tray;
     Thread syncThread;
     volatile bool running = true;
@@ -89,6 +94,9 @@ public class SyncUI : Form {
                     else if (k == "dest") dest = v;
                     else if (k == "securegate") securegate = v;
                     else if (k == "listdir") listdir = v;
+                    else if (k == "autosend") autoSend = (v == "1" || v.ToLower() == "true");
+                    else if (k == "autosend_stable") int.TryParse(v, out autoSendStableSec);
+                    else if (k == "autosend_timeout") int.TryParse(v, out autoSendTimeoutSec);
                 }
         } catch { }
         if (dest == "") dest = "C:\\SecureGateWatch";
@@ -103,6 +111,9 @@ public class SyncUI : Form {
         sb.Append("dest=").Append(dest).Append("\r\n");
         sb.Append("securegate=").Append(securegate).Append("\r\n");
         sb.Append("listdir=").Append(listdir).Append("\r\n");
+        sb.Append("autosend=").Append(autoSend ? "true" : "false").Append("\r\n");
+        sb.Append("autosend_stable=").Append(autoSendStableSec).Append("\r\n");
+        sb.Append("autosend_timeout=").Append(autoSendTimeoutSec).Append("\r\n");
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
     }
 
@@ -113,7 +124,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 486);
+        ClientSize = new Size(420, 508);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -139,10 +150,15 @@ public class SyncUI : Form {
         chkAuto.Checked = File.Exists(StartupLnk());
         chkAuto.CheckedChanged += (s, e) => SetAutostart(chkAuto.Checked);
 
-        txtLog = new TextBox { Location = new Point(14, 366), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        chkSend = new CheckBox { Text = "전송목록 등록이 끝나면 [파일보내기] 자동 클릭", Location = new Point(14, 362), AutoSize = true };
+        chkSend.Checked = autoSend;
+        chkSend.CheckedChanged += (s, e) => { autoSend = chkSend.Checked; SaveConfig();
+            Log(autoSend ? "자동보내기 켬" : "자동보내기 끔"); };
+
+        txtLog = new TextBox { Location = new Point(14, 388), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
         Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
-                                          picQr, lblQrHint, lblUrl, chkAuto, txtLog });
+                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, txtLog });
 
         tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
         var menu = new ContextMenu();
@@ -337,8 +353,93 @@ public class SyncUI : Form {
             var psi = new ProcessStartInfo(securegate, "F " + paths.Count + " " + lp); psi.UseShellExecute = true;
             Process.Start(psi);
             Log("SecureGate 투입: " + paths.Count + "장");
+            AutoSendWhenReady();
         } catch (Exception e) { Log("SecureGate 투입 실패: " + e.Message); }
     }
+    // ── SecureGate [파일보내기] 자동 클릭 ───────────────────────────────
+    // 좌표 클릭이 아니라 컨트롤 ID로 버튼을 찾아 BM_CLICK 을 보냄(해상도/창위치 무관).
+    // 대용량 파일은 SecureGate 가 목록에 등록하는 데 시간이 걸리므로,
+    // "목록 건수가 N초간 변화 없음 + 버튼 활성" 이 될 때까지 기다린 뒤 클릭한다.
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr p, EnumProc cb, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
+
+    const int  ID_SEND = 3006;             // [파일보내기] 버튼
+    const int  ID_LIST = 3009;             // 전송 파일 목록(SysListView32)
+    const uint BM_CLICK = 0x00F5;
+    const uint LVM_GETITEMCOUNT = 0x1004;
+
+    static string WinText(IntPtr h) { var sb = new StringBuilder(512); GetWindowTextW(h, sb, 512); return sb.ToString(); }
+
+    static IntPtr FindTransferWindow() {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr h, IntPtr l) {
+            if (!IsWindowVisible(h)) return true;
+            if (WinText(h).IndexOf("자료전송", StringComparison.Ordinal) < 0) return true;
+            int pid; GetWindowThreadProcessId(h, out pid);
+            try {
+                if (Process.GetProcessById(pid).ProcessName.IndexOf("SecureGate", StringComparison.OrdinalIgnoreCase) < 0)
+                    return true;
+            } catch { return true; }
+            found = h; return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    static void FindSendControls(IntPtr root, out IntPtr btn, out IntPtr list) {
+        IntPtr b = IntPtr.Zero, lv = IntPtr.Zero;
+        EnumChildWindows(root, delegate(IntPtr h, IntPtr l) {
+            int id = GetDlgCtrlID(h);
+            // ID + 텍스트 이중 검증 — 엉뚱한 버튼을 누르지 않도록
+            if (id == ID_SEND && b == IntPtr.Zero && WinText(h) == "파일보내기") b = h;
+            else if (id == ID_LIST && lv == IntPtr.Zero) lv = h;
+            return true;
+        }, IntPtr.Zero);
+        btn = b; list = lv;
+    }
+
+    void AutoSendWhenReady() {
+        if (!autoSend) return;
+        ThreadPool.QueueUserWorkItem(_ => {
+            try {
+                DateTime deadline = DateTime.Now.AddSeconds(autoSendTimeoutSec);
+                IntPtr win = IntPtr.Zero;
+                while (DateTime.Now < deadline && win == IntPtr.Zero) {
+                    win = FindTransferWindow();
+                    if (win == IntPtr.Zero) Thread.Sleep(1000);
+                }
+                if (win == IntPtr.Zero) { Log("자동보내기: 자료전송 창을 찾지 못함 → 직접 눌러주세요"); return; }
+
+                IntPtr btn, lv; FindSendControls(win, out btn, out lv);
+                if (btn == IntPtr.Zero || lv == IntPtr.Zero) {
+                    Log("자동보내기: 버튼/목록을 찾지 못함(프로그램 버전 변경?) → 직접 눌러주세요"); return;
+                }
+
+                int last = -1; DateTime stableSince = DateTime.Now;
+                while (DateTime.Now < deadline) {
+                    int cnt = SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                    if (cnt != last) {                       // 아직 등록 중(대용량이면 오래 걸림)
+                        last = cnt; stableSince = DateTime.Now;
+                        Log("자동보내기: 목록 " + cnt + "건 등록중...");
+                    } else if (cnt > 0 && IsWindowEnabled(btn)
+                               && (DateTime.Now - stableSince).TotalSeconds >= autoSendStableSec) {
+                        SendMessage(btn, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                        Log("자동보내기: [파일보내기] 클릭 완료 — " + cnt + "건");
+                        return;
+                    }
+                    Thread.Sleep(500);
+                }
+                Log("자동보내기: 대기 시간 초과(" + autoSendTimeoutSec + "초) → 직접 눌러주세요");
+            } catch (Exception e) { Log("자동보내기 오류: " + e.Message + " → 직접 눌러주세요"); }
+        });
+    }
+
     static string Unique(string p) {
         if (!File.Exists(p)) return p;
         string dir = Path.GetDirectoryName(p), b = Path.GetFileNameWithoutExtension(p), e = Path.GetExtension(p); int i = 1; string c;
