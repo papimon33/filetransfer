@@ -26,6 +26,10 @@ public class SyncUI : Form {
     // 받는 폴더에 직접 넣은 파일도 자동 투입(기본 ON)
     bool watchFolder = true;
     readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    // 다운로드 폴더 감시 → 새 다운로드마다 [자료전송]/[무시] 토스트(기본 ON)
+    bool askDownloads = true;
+    string downloadsDir = "";
+    readonly List<Form> toasts = new List<Form>();
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
     bool autoSend = false;
     int autoSendStableSec = 3;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량 등록 대기)
@@ -36,7 +40,7 @@ public class SyncUI : Form {
     Label lblStatus, lblUrl, lblUpdate;
     Button btnUpdate;
     PictureBox picQr;
-    CheckBox chkAuto, chkSend, chkWatch;
+    CheckBox chkAuto, chkSend, chkWatch, chkAsk;
     NotifyIcon tray;
     Thread syncThread;
     volatile bool running = true;
@@ -86,6 +90,7 @@ public class SyncUI : Form {
         StartShowListener();
         StartUpdateChecker();
         StartFolderWatch();
+        StartDownloadWatch();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
             LoadQr();
@@ -115,6 +120,7 @@ public class SyncUI : Form {
                     // autosend_stable/timeout 은 더 이상 config 에서 읽지 않음(컴파일 기본값 사용 → 업데이트로 개선 전파)
                     else if (k == "srcsha") srcSha = v;
                     else if (k == "watchfolder") watchFolder = (v == "1" || v.ToLower() == "true");
+                    else if (k == "askdownloads") askDownloads = (v == "1" || v.ToLower() == "true");
                 }
         } catch { }
         if (dest == "") dest = "C:\\SecureGateWatch";
@@ -132,6 +138,7 @@ public class SyncUI : Form {
         sb.Append("autosend=").Append(autoSend ? "true" : "false").Append("\r\n");
         sb.Append("srcsha=").Append(srcSha).Append("\r\n");
         sb.Append("watchfolder=").Append(watchFolder ? "true" : "false").Append("\r\n");
+        sb.Append("askdownloads=").Append(askDownloads ? "true" : "false").Append("\r\n");
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
     }
 
@@ -142,7 +149,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 560);
+        ClientSize = new Size(420, 584);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -178,15 +185,20 @@ public class SyncUI : Form {
         chkWatch.CheckedChanged += (s, e) => { watchFolder = chkWatch.Checked; SaveConfig();
             Log(watchFolder ? "폴더 감시 켬: " + dest : "폴더 감시 끔"); };
 
-        lblUpdate = new Label { Location = new Point(14, 412), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
+        chkAsk = new CheckBox { Text = "다운로드할 때마다 자료전송 여부 물어보기", Location = new Point(14, 406), AutoSize = true };
+        chkAsk.Checked = askDownloads;
+        chkAsk.CheckedChanged += (s, e) => { askDownloads = chkAsk.Checked; SaveConfig();
+            Log(askDownloads ? "다운로드 감시 켬: " + downloadsDir : "다운로드 감시 끔"); };
+
+        lblUpdate = new Label { Location = new Point(14, 434), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
                                 TextAlign = ContentAlignment.MiddleLeft, Visible = false };
-        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 408), Size = new Size(136, 26), Visible = false };
+        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 430), Size = new Size(136, 26), Visible = false };
         btnUpdate.Click += (s, e) => ApplyUpdate();
 
-        txtLog = new TextBox { Location = new Point(14, 440), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        txtLog = new TextBox { Location = new Point(14, 462), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
         Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
-                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkWatch,
+                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkWatch, chkAsk,
                                           lblUpdate, btnUpdate, txtLog });
 
         tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
@@ -529,6 +541,95 @@ public class SyncUI : Form {
         catch { return false; }
     }
 
+    // ── 다운로드 폴더 감시 → 새 다운로드마다 [자료전송]/[무시] 토스트 ──
+    string GetDownloadsDir() {
+        try {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                       @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")) {
+                if (k != null) {
+                    var v = k.GetValue("{374DE290-123F-4565-9164-39C4925E467B}") as string;
+                    if (!string.IsNullOrEmpty(v)) return Environment.ExpandEnvironmentVariables(v);
+                }
+            }
+        } catch { }
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+    }
+
+    void StartDownloadWatch() {
+        var t = new Thread(() => {
+            downloadsDir = GetDownloadsDir();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try { if (Directory.Exists(downloadsDir)) foreach (var f in Directory.GetFiles(downloadsDir)) seen.Add(f); }
+            catch { }
+            var sizes = new Dictionary<string, long>();
+            while (running) {
+                try {
+                    if (askDownloads && Directory.Exists(downloadsDir)) {
+                        foreach (var f in Directory.GetFiles(downloadsDir)) {
+                            if (seen.Contains(f)) continue;
+                            string ext = Path.GetExtension(f).ToLowerInvariant();
+                            if (ext == ".crdownload" || ext == ".part" || ext == ".partial"
+                                || ext == ".tmp" || ext == ".download") continue;   // 브라우저 임시파일
+                            long len; try { len = new FileInfo(f).Length; } catch { continue; }
+                            long prev;
+                            if (!sizes.TryGetValue(f, out prev) || prev != len) { sizes[f] = len; continue; }
+                            if (!IsFileReady(f)) continue;             // 아직 받는 중
+                            seen.Add(f); sizes.Remove(f);
+                            string path = f;
+                            try { BeginInvoke((Action)(() => ShowTransferToast(path))); } catch { }
+                        }
+                    }
+                } catch (Exception e) { Log("다운로드 감시 오류: " + e.Message); }
+                Thread.Sleep(1500);
+            }
+        });
+        t.IsBackground = true; t.Start();
+    }
+
+    void ShowTransferToast(string filePath) {
+        var f = new ToastForm();
+        f.Size = new Size(330, 96);
+        f.BackColor = Color.FromArgb(37, 99, 235);
+        var lbl1 = new Label { Text = "새 다운로드 — 자료전송할까요?", ForeColor = Color.White,
+                               Font = new Font("Malgun Gothic", 8F), Location = new Point(12, 8), AutoSize = true };
+        var lbl2 = new Label { Text = Path.GetFileName(filePath), ForeColor = Color.White,
+                               Font = new Font("Malgun Gothic", 9.5F, FontStyle.Bold),
+                               Location = new Point(12, 28), Size = new Size(306, 20), AutoEllipsis = true };
+        var btnGo = new Button { Text = "자료전송", Location = new Point(158, 56), Size = new Size(90, 30),
+                                 FlatStyle = FlatStyle.Flat, BackColor = Color.White, ForeColor = Color.FromArgb(37, 99, 235) };
+        var btnNo = new Button { Text = "무시", Location = new Point(254, 56), Size = new Size(64, 30),
+                                 FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(37, 99, 235), ForeColor = Color.White };
+        btnNo.FlatAppearance.BorderColor = Color.White;
+        var timer = new System.Windows.Forms.Timer { Interval = 10000 };     // 10초 후 자동 무시
+        Action close = () => { try { timer.Stop(); toasts.Remove(f); f.Close(); RepositionToasts(); } catch { } };
+        btnGo.Click += (s, e) => { close(); TransferDownloaded(filePath); };
+        btnNo.Click += (s, e) => close();
+        timer.Tick += (s, e) => close();
+        f.Controls.AddRange(new Control[] { lbl1, lbl2, btnGo, btnNo });
+        toasts.Add(f);
+        PositionToast(f);
+        f.Show();
+        timer.Start();
+    }
+
+    void PositionToast(Form f) {
+        var wa = Screen.PrimaryScreen.WorkingArea;
+        int idx = toasts.IndexOf(f); if (idx < 0) idx = toasts.Count - 1;
+        f.Location = new Point(wa.Right - f.Width - 12, wa.Bottom - 12 - (f.Height + 8) * (idx + 1));
+    }
+    void RepositionToasts() {
+        var wa = Screen.PrimaryScreen.WorkingArea;
+        for (int i = 0; i < toasts.Count; i++)
+            toasts[i].Location = new Point(wa.Right - toasts[i].Width - 12, wa.Bottom - 12 - (toasts[i].Height + 8) * (i + 1));
+    }
+
+    void TransferDownloaded(string filePath) {
+        if (!File.Exists(filePath)) { Log("자료전송 취소: 파일이 사라짐 " + Path.GetFileName(filePath)); return; }
+        lock (fedFiles) fedFiles.Add(filePath);
+        Log("다운로드 자료전송: " + Path.GetFileName(filePath));
+        ThreadPool.QueueUserWorkItem(_ => Feed(new List<string> { filePath }));
+    }
+
     /// 윈도우 알림(트레이 풍선) — UI 스레드로 마샬링. 5초 후 사라짐.
     void Notify(string title, string text) {
         Log(title + " — " + text);
@@ -664,5 +765,23 @@ public class SyncUI : Form {
     }
     void SetStatus(string s) {
         try { if (lblStatus != null && lblStatus.IsHandleCreated) lblStatus.BeginInvoke((Action)(() => lblStatus.Text = s)); else if (lblStatus != null) lblStatus.Text = s; } catch { }
+    }
+}
+
+// 다운로드 알림 토스트 — 포커스를 뺏지 않고(WS_EX_NOACTIVATE) 항상 위(WS_EX_TOPMOST)에 뜨는 작은 창
+class ToastForm : Form {
+    public ToastForm() {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+    }
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE — 입력 포커스 안 뺏음
+            cp.ExStyle |= 0x00000008;   // WS_EX_TOPMOST
+            return cp;
+        }
     }
 }
