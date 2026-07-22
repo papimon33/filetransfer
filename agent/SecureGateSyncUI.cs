@@ -22,7 +22,7 @@ public class SyncUI : Form {
     string server = "https://qr-upload-server.onrender.com";
     volatile string token = "";
     string sabeon = "", dest = "", securegate = "", listdir = "", srcSha = "";
-    int intervalMs = 1500;   // 서버 폴링 주기(응답 ~0.3s 확인됨 → 1.5s로 단축)
+    int intervalMs = 3000;   // 서버 폴링 주기(10명 규모 트래픽 고려 3s)
     // 받는 폴더에 직접 넣은 파일도 자동 투입(기본 ON)
     bool watchFolder = true;
     readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -351,11 +351,25 @@ public class SyncUI : Form {
         if (syncThread != null && syncThread.IsAlive) return;
         syncThread = new Thread(SyncLoop); syncThread.IsBackground = true; syncThread.Start();
     }
+    bool wasQuiet = false;
     void SyncLoop() {
         while (running) {
-            try { if (!string.IsNullOrEmpty(token)) SyncOnce(); } catch (Exception e) { Log("동기화 오류: " + e.Message); }
+            try {
+                bool quiet = IsQuietHours();
+                if (quiet != wasQuiet) {
+                    Log(quiet ? "야간(21~08시) — 서버 폴링 중지(서버 부하/실행시간 절약)"
+                              : "주간 — 서버 폴링 재개");
+                    wasQuiet = quiet;
+                }
+                if (!string.IsNullOrEmpty(token) && !quiet) SyncOnce();
+            } catch (Exception e) { Log("동기화 오류: " + e.Message); }
             Thread.Sleep(intervalMs);
         }
+    }
+    // 야간(한국시간 21:00~08:00)엔 서버 폴링을 멈춘다. PC 시간대와 무관하게 UTC+9 로 판정.
+    static bool IsQuietHours() {
+        int h = DateTime.UtcNow.AddHours(9).Hour;
+        return h >= 21 || h < 8;
     }
     void SyncOnce() {
         string body;
