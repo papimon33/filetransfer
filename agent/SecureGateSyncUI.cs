@@ -23,8 +23,8 @@ public class SyncUI : Form {
     volatile string token = "";
     string sabeon = "", dest = "", securegate = "", listdir = "", srcSha = "";
     int intervalMs = 3000;   // 서버 폴링 주기(10명 규모 트래픽 고려 3s)
-    // 받는 폴더에 직접 넣은 파일도 자동 투입(기본 ON)
-    bool watchFolder = true;
+    // 받는 폴더에 직접 넣은 파일도 자동 투입(항상 ON — 옵션 제거됨)
+    readonly bool watchFolder = true;
     readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // 다운로드 폴더 감시 → 새 다운로드마다 [자료전송]/[무시] 토스트(기본 ON)
     bool askDownloads = true;
@@ -40,7 +40,7 @@ public class SyncUI : Form {
     Label lblStatus, lblUrl, lblUpdate;
     Button btnUpdate;
     PictureBox picQr;
-    CheckBox chkAuto, chkSend, chkWatch, chkAsk;
+    CheckBox chkAuto, chkSend, chkAsk;
     NotifyIcon tray;
     Thread syncThread;
     volatile bool running = true;
@@ -93,6 +93,7 @@ public class SyncUI : Form {
         StartDownloadWatch();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
+            SetEnrolledUi(true);            // 이미 등록됨 → 사번/PIN 잠그고 버튼 "재발급"
             LoadQr();
             StartSync();
             SetStatus("동기화 중 — 폰 업로드를 기다립니다.");
@@ -119,7 +120,6 @@ public class SyncUI : Form {
                     else if (k == "autosend") autoSend = (v == "1" || v.ToLower() == "true");
                     // autosend_stable/timeout 은 더 이상 config 에서 읽지 않음(컴파일 기본값 사용 → 업데이트로 개선 전파)
                     else if (k == "srcsha") srcSha = v;
-                    else if (k == "watchfolder") watchFolder = (v == "1" || v.ToLower() == "true");
                     else if (k == "askdownloads") askDownloads = (v == "1" || v.ToLower() == "true");
                 }
         } catch { }
@@ -137,7 +137,6 @@ public class SyncUI : Form {
         sb.Append("listdir=").Append(listdir).Append("\r\n");
         sb.Append("autosend=").Append(autoSend ? "true" : "false").Append("\r\n");
         sb.Append("srcsha=").Append(srcSha).Append("\r\n");
-        sb.Append("watchfolder=").Append(watchFolder ? "true" : "false").Append("\r\n");
         sb.Append("askdownloads=").Append(askDownloads ? "true" : "false").Append("\r\n");
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
     }
@@ -149,7 +148,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 584);
+        ClientSize = new Size(420, 562);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -158,7 +157,7 @@ public class SyncUI : Form {
         txtPin = new TextBox { Location = new Point(182, 15), Size = new Size(80, 24), MaxLength = 6,
                                UseSystemPasswordChar = true };
         btnEnroll = new Button { Text = "발급 / 등록", Location = new Point(272, 14), Size = new Size(120, 26) };
-        btnEnroll.Click += (s, e) => DoEnroll();
+        btnEnroll.Click += (s, e) => OnEnrollButton();
         txtSabeon.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { txtPin.Focus(); e.SuppressKeyPress = true; } };
         txtPin.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { DoEnroll(); e.SuppressKeyPress = true; } };
         var lblPinHint = new Label { Text = "PIN 숫자 4~6자리 — 최초 등록 시 정한 PIN이어야 내 사번을 쓸 수 있습니다.",
@@ -180,25 +179,22 @@ public class SyncUI : Form {
         chkSend.CheckedChanged += (s, e) => { autoSend = chkSend.Checked; SaveConfig();
             Log(autoSend ? "자동보내기 켬" : "자동보내기 끔"); };
 
-        chkWatch = new CheckBox { Text = "받는 폴더에 직접 넣은 파일도 자동 투입", Location = new Point(14, 384), AutoSize = true };
-        chkWatch.Checked = watchFolder;
-        chkWatch.CheckedChanged += (s, e) => { watchFolder = chkWatch.Checked; SaveConfig();
-            Log(watchFolder ? "폴더 감시 켬: " + dest : "폴더 감시 끔"); };
+        // 받는 폴더 직접 투입은 항상 켜짐(체크박스 제거) → watchFolder 는 상시 true
 
-        chkAsk = new CheckBox { Text = "다운로드할 때마다 자료전송 여부 물어보기", Location = new Point(14, 406), AutoSize = true };
+        chkAsk = new CheckBox { Text = "다운로드할 때마다 자료전송 여부 물어보기", Location = new Point(14, 384), AutoSize = true };
         chkAsk.Checked = askDownloads;
         chkAsk.CheckedChanged += (s, e) => { askDownloads = chkAsk.Checked; SaveConfig();
             Log(askDownloads ? "다운로드 감시 켬: " + downloadsDir : "다운로드 감시 끔"); };
 
-        lblUpdate = new Label { Location = new Point(14, 434), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
+        lblUpdate = new Label { Location = new Point(14, 412), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
                                 TextAlign = ContentAlignment.MiddleLeft, Visible = false };
-        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 430), Size = new Size(136, 26), Visible = false };
+        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 408), Size = new Size(136, 26), Visible = false };
         btnUpdate.Click += (s, e) => ApplyUpdate();
 
-        txtLog = new TextBox { Location = new Point(14, 462), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        txtLog = new TextBox { Location = new Point(14, 440), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
         Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
-                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkWatch, chkAsk,
+                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkAsk,
                                           lblUpdate, btnUpdate, txtLog });
 
         tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
@@ -286,6 +282,19 @@ public class SyncUI : Form {
     }
 
     // ── 발급 ──
+    bool enrolledLocked = false;
+    void OnEnrollButton() {
+        if (enrolledLocked) { SetEnrolledUi(false); return; }   // "재발급" → 잠금 해제하고 다시 입력받기
+        DoEnroll();
+    }
+    // 등록 완료 시 사번/PIN 잠그고 버튼을 "재발급"으로, 해제 시 원복
+    void SetEnrolledUi(bool locked) {
+        enrolledLocked = locked;
+        txtSabeon.Enabled = !locked;
+        txtPin.Enabled = !locked;
+        if (locked) { txtPin.Text = ""; btnEnroll.Text = "재발급"; }
+        else { btnEnroll.Text = "발급 / 등록"; txtSabeon.Focus(); }
+    }
     void DoEnroll() {
         string sb = (txtSabeon.Text ?? "").Trim();
         string pn = (txtPin.Text ?? "").Trim();
@@ -309,7 +318,7 @@ public class SyncUI : Form {
                     bool existed = o.ContainsKey("existed") && Convert.ToBoolean(o["existed"]);
                     SaveConfig();
                     Log((existed ? "기존 토큰 등록" : "새 토큰 발급") + " (사번 " + sb + ")");
-                    BeginInvoke((Action)(() => { LoadQr(); }));
+                    BeginInvoke((Action)(() => { LoadQr(); SetEnrolledUi(true); }));
                     SetStatus("동기화 중 — 폰 업로드를 기다립니다.");
                     StartSync();
                 } else {
