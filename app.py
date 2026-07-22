@@ -210,13 +210,18 @@ class _FileStore:
         return found
     def all(self): return self._load()
 
+STORE_INFO = {"kind": "file", "mongo_error": None, "uri_set": bool(MONGODB_URI)}
+
 def _make_store():
     if MONGODB_URI:
         try:
             s = _MongoStore(MONGODB_URI, MONGODB_DB)
+            s.all()                       # 실제 쿼리로 연결 확인(생성만으로는 lazy)
+            STORE_INFO["kind"] = "mongo"
             print(f"[store] MongoDB 사용 (db={MONGODB_DB})")
             return s
         except Exception as e:
+            STORE_INFO["mongo_error"] = f"{type(e).__name__}: {e}"
             print(f"[store] MongoDB 연결 실패 → 파일 저장소로 대체: {e}")
     return _FileStore(TOKENS_FILE)
 
@@ -801,6 +806,33 @@ def download_generic_setup():
     ps = build_installer_ps1(base_url(), "")
     return Response(content=ps.encode("utf-8-sig"), media_type="text/plain",
                     headers={"Content-Disposition": 'attachment; filename="SecureGate-Setup.ps1"'})
+
+@app.get("/storez")
+def storez():
+    """저장소 진단 — MongoDB 연결 여부/실패사유. 비밀번호는 마스킹."""
+    uri = MONGODB_URI or ""
+    masked = ""
+    if uri:
+        # mongodb+srv://user:PASS@host/... 에서 자격증명만 가림
+        try:
+            head, tail = uri.split("://", 1)
+            creds, host = tail.split("@", 1) if "@" in tail else ("", tail)
+            user = creds.split(":", 1)[0] if creds else ""
+            masked = f"{head}://{user}:***@{host}"
+        except Exception:
+            masked = "(파싱 불가)"
+    try:
+        n = len(store.all())
+    except Exception as e:
+        n = f"조회실패: {e}"
+    return {
+        "store": STORE_INFO["kind"],                         # "mongo" 면 정상, "file" 이면 재배포 시 초기화됨
+        "uri_set": STORE_INFO["uri_set"],
+        "db": MONGODB_DB,
+        "mongo_error": STORE_INFO["mongo_error"],            # file 로 떨어졌으면 여기에 원인
+        "uri_masked": masked,
+        "token_count": n,
+    }
 
 @app.get("/agent/version")
 def agent_version():
