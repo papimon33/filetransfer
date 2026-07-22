@@ -464,8 +464,12 @@ public class SyncUI : Form {
         btn = b; list = lv;
     }
 
+    int autoSendInFlight = 0;   // 자동보내기 동시 실행 방지(스레드 누적/중복 클릭 방지)
     void AutoSendWhenReady(List<string> fedPaths) {
         if (!autoSend) return;
+        if (Interlocked.CompareExchange(ref autoSendInFlight, 1, 0) != 0) {
+            Log("자동보내기: 이전 전송 대기 중 → 다음 폴링에서 함께 처리"); return;
+        }
         string fileNames = NameList(fedPaths, 3);
         ThreadPool.QueueUserWorkItem(_ => {
             try {
@@ -510,6 +514,7 @@ public class SyncUI : Form {
                 }
                 Log("자동보내기: 대기 시간 초과(" + autoSendTimeoutSec + "초) → 직접 눌러주세요");
             } catch (Exception e) { Log("자동보내기 오류: " + e.Message + " → 직접 눌러주세요"); }
+            finally { Interlocked.Exchange(ref autoSendInFlight, 0); }
         });
     }
 
@@ -698,12 +703,13 @@ public class SyncUI : Form {
                 if (sha != srcSha) {
                     newSha = sha; newVer = ver;
                     Log("새 버전 발견: v" + ver + " — [지금 업데이트] 를 누르세요");
+                    // 배너 + 풍선알림 모두 UI 스레드에서(크로스스레드 NotifyIcon 호출은 프로세스 행 유발)
                     try { BeginInvoke((Action)(() => {
                         lblUpdate.Text = "🔔 새 버전 v" + ver + " 사용 가능";
                         lblUpdate.Visible = true; btnUpdate.Visible = true; btnUpdate.Enabled = true;
+                        try { tray.ShowBalloonTip(4000, "SecureGate 자동전송",
+                              "새 버전 v" + ver + " 이 있습니다. 앱을 열어 [지금 업데이트]를 누르세요.", ToolTipIcon.Info); } catch { }
                     })); } catch { }
-                    try { tray.ShowBalloonTip(4000, "SecureGate 자동전송",
-                          "새 버전 v" + ver + " 이 있습니다. 앱을 열어 [지금 업데이트]를 누르세요.", ToolTipIcon.Info); } catch { }
                 } else if (!silent) Log("최신 버전입니다 (v" + ver + ")");
             } catch (Exception e) { if (!silent) Log("업데이트 확인 실패: " + e.Message); }
         });
