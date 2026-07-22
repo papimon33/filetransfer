@@ -724,6 +724,15 @@ public class SyncUI : Form {
         });
     }
 
+    static string Sha256Hex(byte[] data) {
+        using (var sha = System.Security.Cryptography.SHA256.Create()) {
+            byte[] h = sha.ComputeHash(data);
+            var sb = new StringBuilder(h.Length * 2);
+            foreach (byte b in h) sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
+    }
+
     void ApplyUpdate() {
         if (updateBusy) return;
         updateBusy = true;
@@ -736,10 +745,13 @@ public class SyncUI : Form {
             string newExe = Path.Combine(dir, "SecureGateSyncUI.new.exe");
             string oldExe = Path.Combine(dir, "SecureGateSyncUI.old.exe");
             try {
-                string src;
-                using (var wc = new WebClient()) { wc.Encoding = Encoding.UTF8; src = wc.DownloadString(server + "/agent/source.cs"); }
-                if (src.Length < 1000) throw new Exception("소스가 비정상적으로 짧음");
-                File.WriteAllText(newCs, src, new UTF8Encoding(true));
+                // 바이트로 받아 그대로 저장 + 그 바이트의 해시를 기록 → 서버가 계산하는 해시와 정확히 일치
+                // (알림 시점 해시가 아니라 '실제 받은 소스' 해시라, 받는 도중 서버가 또 배포돼도 재알림 없음)
+                byte[] srcBytes;
+                using (var wc = new WebClient()) srcBytes = wc.DownloadData(server + "/agent/source.cs");
+                if (srcBytes.Length < 1000) throw new Exception("소스가 비정상적으로 짧음");
+                string builtSha = Sha256Hex(srcBytes);
+                File.WriteAllBytes(newCs, srcBytes);
 
                 string win = Environment.GetEnvironmentVariable("WINDIR");
                 string csc = Path.Combine(win, @"Microsoft.NET\Framework64\v4.0.30319\csc.exe");
@@ -763,7 +775,7 @@ public class SyncUI : Form {
                 try { File.Move(newExe, exe); }
                 catch { File.Move(oldExe, exe); throw; }      // 실패 시 롤백
 
-                srcSha = newSha; SaveConfig();
+                srcSha = builtSha; SaveConfig();   // 알림 시점(newSha)이 아니라 실제 컴파일한 소스 해시
                 Log("업데이트 완료 (v" + newVer + ") — 재시작합니다");
                 try { Process.Start(exe, "/updated"); } catch { }
                 running = false;
