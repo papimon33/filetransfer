@@ -22,13 +22,13 @@ public class SyncUI : Form {
     string server = "https://qr-upload-server.onrender.com";
     volatile string token = "";
     string sabeon = "", dest = "", securegate = "", listdir = "", srcSha = "";
-    int intervalMs = 4000;
+    int intervalMs = 1500;   // 서버 폴링 주기(응답 ~0.3s 확인됨 → 1.5s로 단축)
     // 받는 폴더에 직접 넣은 파일도 자동 투입(기본 ON)
     bool watchFolder = true;
     readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
     bool autoSend = false;
-    int autoSendStableSec = 5;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량 등록 대기)
+    int autoSendStableSec = 3;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량 등록 대기)
     int autoSendTimeoutSec = 900;   // 대용량 감안한 최대 대기
 
     TextBox txtSabeon, txtPin, txtLog;
@@ -112,8 +112,7 @@ public class SyncUI : Form {
                     else if (k == "securegate") securegate = v;
                     else if (k == "listdir") listdir = v;
                     else if (k == "autosend") autoSend = (v == "1" || v.ToLower() == "true");
-                    else if (k == "autosend_stable") int.TryParse(v, out autoSendStableSec);
-                    else if (k == "autosend_timeout") int.TryParse(v, out autoSendTimeoutSec);
+                    // autosend_stable/timeout 은 더 이상 config 에서 읽지 않음(컴파일 기본값 사용 → 업데이트로 개선 전파)
                     else if (k == "srcsha") srcSha = v;
                     else if (k == "watchfolder") watchFolder = (v == "1" || v.ToLower() == "true");
                 }
@@ -131,8 +130,6 @@ public class SyncUI : Form {
         sb.Append("securegate=").Append(securegate).Append("\r\n");
         sb.Append("listdir=").Append(listdir).Append("\r\n");
         sb.Append("autosend=").Append(autoSend ? "true" : "false").Append("\r\n");
-        sb.Append("autosend_stable=").Append(autoSendStableSec).Append("\r\n");
-        sb.Append("autosend_timeout=").Append(autoSendTimeoutSec).Append("\r\n");
         sb.Append("srcsha=").Append(srcSha).Append("\r\n");
         sb.Append("watchfolder=").Append(watchFolder ? "true" : "false").Append("\r\n");
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
@@ -521,7 +518,7 @@ public class SyncUI : Form {
                         }
                     }
                 } catch (Exception e) { Log("폴더 감시 오류: " + e.Message); }
-                Thread.Sleep(3000);
+                Thread.Sleep(1500);
             }
         });
         t.IsBackground = true; t.Start();
