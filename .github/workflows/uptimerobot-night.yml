@@ -1,0 +1,86 @@
+name: UptimeRobot 야간 pause / 주간 resume
+
+# 목적: 무료 Render 인스턴스 2개가 750시간 풀을 나눠 쓰므로, 밤에는 재워서 시간을 아낀다.
+#  - 밤에 UptimeRobot 핑을 멈추면(모니터 pause) + 앱 야간 폴링 중지와 맞물려 → 서버가 슬립 → 시간 차감 안 됨
+#  - UptimeRobot 무료 API 로 editMonitor(status 0=pause / 1=resume) 호출 (유지보수시간 기능은 유료라 사용 안 함)
+#
+# 준비: 리포 Settings → Secrets and variables → Actions 에
+#   UPTIMEROBOT_API_KEY = UptimeRobot 계정의 "Main API Key" (읽기전용 키 말고 Main)
+#   (선택) UPTIMEROBOT_MONITOR_IDS = "1234-5678" 처럼 특정 모니터만 대상(생략 시 계정의 모든 모니터)
+#
+# 주의:
+#  - GitHub 예약 실행(cron)은 UTC 기준이며 몇 분~십수 분 지연될 수 있음(경계 정밀도는 낮아도 무방).
+#  - 예약 워크플로는 리포가 60일 이상 무커밋이면 GitHub 이 자동 비활성화함(가끔 커밋하면 유지).
+#  - 시간을 바꾸려면 아래 cron 두 줄만 수정.
+
+on:
+  schedule:
+    - cron: '0 12 * * *'   # 21:00 KST (UTC+9) → pause
+    - cron: '0 23 * * *'   # 08:00 KST (전날 23:00 UTC) → resume
+  workflow_dispatch:
+    inputs:
+      action:
+        description: '수동 실행: pause 또는 resume'
+        required: true
+        default: pause
+        type: choice
+        options: [pause, resume]
+
+concurrency:
+  group: uptimerobot-toggle
+  cancel-in-progress: false
+
+jobs:
+  toggle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 목표 상태 결정 (pause=0 / resume=1)
+        id: st
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ACT="${{ github.event.inputs.action }}"
+          elif [ "${{ github.event.schedule }}" = "0 12 * * *" ]; then
+            ACT="pause"
+          else
+            ACT="resume"
+          fi
+          [ "$ACT" = "pause" ] && STATUS=0 || STATUS=1
+          echo "act=$ACT"       >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "→ $ACT (status=$STATUS)"
+
+      - name: UptimeRobot 모니터 토글
+        env:
+          UR_KEY: ${{ secrets.UPTIMEROBOT_API_KEY }}
+          UR_IDS: ${{ secrets.UPTIMEROBOT_MONITOR_IDS }}
+          STATUS: ${{ steps.st.outputs.status }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UR_KEY:-}" ]; then
+            echo "::error::UPTIMEROBOT_API_KEY 시크릿이 없습니다."; exit 1
+          fi
+
+          # 대상 모니터 ID 목록: 시크릿에 지정돼 있으면 그것, 아니면 계정 전체
+          if [ -n "${UR_IDS:-}" ]; then
+            IDS=$(echo "$UR_IDS" | tr ',-' '  ')
+          else
+            RESP=$(curl -s -X POST https://api.uptimerobot.com/v2/getMonitors \
+                     -d "api_key=$UR_KEY" -d "format=json")
+            echo "getMonitors: $RESP" | head -c 400; echo
+            IDS=$(echo "$RESP" | jq -r '.monitors[].id')
+          fi
+
+          if [ -z "$(echo "$IDS" | tr -d '[:space:]')" ]; then
+            echo "::warning::대상 모니터가 없습니다."; exit 0
+          fi
+
+          FAIL=0
+          for id in $IDS; do
+            R=$(curl -s -X POST https://api.uptimerobot.com/v2/editMonitor \
+                  -d "api_key=$UR_KEY" -d "format=json" -d "id=$id" -d "status=$STATUS")
+            OK=$(echo "$R" | jq -r '.stat // "fail"')
+            echo "  monitor $id → status=$STATUS : $R"
+            [ "$OK" = "ok" ] || FAIL=1
+          done
+          echo "완료: ${{ steps.st.outputs.act }}"
+          exit $FAIL
