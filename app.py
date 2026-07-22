@@ -933,6 +933,16 @@ CSS = """
   .thumbs .t.doc span { font-size:1.8rem; }
   .thumbs .t.doc small { font-size:.6rem; word-break:break-all; line-height:1.1; max-height:2.4em; overflow:hidden; }
   .thumbs .t img { width:100%; height:100%; object-fit:cover; }
+  .thumbs .t { position:relative; }
+  .thumbs .t .x { position:absolute; top:2px; right:2px; width:22px; height:22px; border-radius:50%;
+                  background:#000a; color:#fff; border:0; font-size:.8rem; line-height:1; padding:0; cursor:pointer; }
+  .thumbs .t .bar { position:absolute; left:0; right:0; bottom:0; height:5px; background:#0003; }
+  .thumbs .t .bar > i { display:block; height:100%; width:0; background:var(--blue); transition:width .15s; }
+  .thumbs .t.done .bar > i { background:#16a34a; }
+  .thumbs .t.done::after { content:'✓'; position:absolute; inset:0; display:flex; align-items:center;
+                           justify-content:center; font-size:1.6rem; color:#16a34a; background:#fff8; }
+  .thumbs .t.fail { outline:2px solid #dc2626; }
+  .toggle { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:.85rem; color:#888; }
   .sticky { position:sticky; bottom:0; padding:12px 0; background:linear-gradient(to top, var(--bg) 72%, transparent); }
   .upbtn { width:100%; font-size:1.15rem; padding:16px; border-radius:14px; }
 
@@ -963,61 +973,130 @@ def render_mobile_upload_page(token: str, info: dict) -> str:
   <input id="cam" type="file" accept="image/*" capture="environment" multiple hidden>
   <input id="gal" type="file" accept="image/*" multiple hidden>
   <input id="doc" type="file" accept="{DOC_ACCEPT}" multiple hidden>
+  <label class="toggle"><input type="checkbox" id="orig"> 원본 화질로 보내기 <span class="hint">(느리고 용량 큼)</span></label>
   <div class="thumbs" id="thumbs"></div>
   <div id="msg"></div>
 </div>
 
 <div class="sticky">
-  <button class="upbtn" id="up" type="button" disabled>업로드 (0장)</button>
+  <button class="upbtn" id="up" type="button" disabled>업로드 (0개)</button>
 </div>
 <div style="text-align:center"><a href="/u/{token}/d" class="hint">PC에서 다운로드하기 →</a></div>
 
 <script>
 const token = {json_str(token)};
-let picked = [];
+const MAXEDGE = 2048, QUALITY = 0.85;   // 긴 변 2048px, JPEG 85%로 축소
+let picked = [], uid = 0, sending = false;
 const $ = s => document.querySelector(s);
-const thumbs = $('#thumbs'), up = $('#up'), msg = $('#msg');
+const thumbs = $('#thumbs'), up = $('#up'), msg = $('#msg'), origChk = $('#orig');
+
+function fmtSize(n) {{
+  if (n < 1024) return n + 'B';
+  if (n < 1048576) return (n/1024).toFixed(0) + 'KB';
+  return (n/1048576).toFixed(1) + 'MB';
+}}
+function totalSize() {{ return picked.reduce((a,p) => a + (p.file ? p.file.size : 0), 0); }}
 
 function refresh() {{
   thumbs.innerHTML = '';
-  for (const f of picked) {{
-    const d = document.createElement('div'); d.className = 't';
-    if (f.type && f.type.indexOf('image/') === 0) {{
-      const img = document.createElement('img'); img.src = URL.createObjectURL(f);
+  for (const p of picked) {{
+    const d = document.createElement('div');
+    d.className = 't' + (p.status==='done'?' done':'') + (p.status==='fail'?' fail':'');
+    if (p.file.type && p.file.type.indexOf('image/') === 0) {{
+      const img = document.createElement('img'); img.src = URL.createObjectURL(p.file);
+      img.onload = () => URL.revokeObjectURL(img.src);
       d.appendChild(img);
     }} else {{
       d.classList.add('doc');
-      d.innerHTML = '<span>📄</span><small>' + f.name.replace(/</g,'&lt;') + '</small>';
+      d.innerHTML = '<span>📄</span><small>' + p.name.replace(/</g,'&lt;') + '</small>';
     }}
+    if (!sending && (p.status==='wait' || p.status==='fail')) {{
+      const x = document.createElement('button'); x.className='x'; x.textContent='✕'; x.type='button';
+      x.onclick = () => {{ picked = picked.filter(q => q.id !== p.id); refresh(); }};
+      d.appendChild(x);
+    }}
+    const bar = document.createElement('div'); bar.className='bar';
+    const i = document.createElement('i'); i.style.width = (p.pct||0) + '%'; bar.appendChild(i);
+    d.appendChild(bar);
     thumbs.appendChild(d);
   }}
-  up.disabled = picked.length === 0;
-  up.textContent = '업로드 (' + picked.length + '개)';
+  const n = picked.length;
+  up.disabled = n === 0 || sending;
+  up.textContent = sending ? '업로드 중...'
+                 : (n ? '업로드 (' + n + '개 · ' + fmtSize(totalSize()) + ')' : '업로드 (0개)');
 }}
-function addFiles(list) {{ for (const f of list) picked.push(f); refresh(); }}
+function addFiles(list) {{
+  for (const f of list) picked.push({{ id: ++uid, file: f, name: f.name, status:'wait', pct:0 }});
+  refresh();
+}}
+
+// 이미지 축소(원본 체크 시 건너뜀). 문서/비이미지는 그대로. 실패하면 원본 사용.
+async function prepare(p) {{
+  const f = p.file;
+  if (origChk.checked) return f;
+  if (!f.type || f.type.indexOf('image/') !== 0) return f;
+  try {{
+    const bmp = await createImageBitmap(f);
+    let w = bmp.width, h = bmp.height;
+    const scale = Math.min(1, MAXEDGE / Math.max(w, h));
+    w = Math.round(w*scale); h = Math.round(h*scale);
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    if (bmp.close) bmp.close();
+    const blob = await new Promise(res => cv.toBlob(res, 'image/jpeg', QUALITY));
+    if (!blob || blob.size >= f.size) return f;         // 축소 이득 없으면 원본
+    const base = f.name.replace(/\.[^.]+$/, '');
+    return new File([blob], base + '.jpg', {{ type:'image/jpeg' }});
+  }} catch (e) {{ return f; }}
+}}
+
+// 파일 1개 업로드 — XHR 진행률
+function uploadOne(p, file) {{
+  return new Promise(resolve => {{
+    const fd = new FormData(); fd.append('files', file, file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/u/' + token + '/upload');
+    xhr.upload.onprogress = e => {{ if (e.lengthComputable) {{ p.pct = Math.round(e.loaded/e.total*100); refresh(); }} }};
+    xhr.onload = () => {{
+      let ok = false, errmsg = '';
+      try {{ const j = JSON.parse(xhr.responseText); ok = xhr.status===200 && j.uploaded>=1;
+             if (!ok && j.errors && j.errors.length) errmsg = j.errors[0]; }} catch(_){{}}
+      p.status = ok ? 'done' : 'fail'; p.pct = ok ? 100 : 0; p.err = errmsg; resolve(ok);
+    }};
+    xhr.onerror = () => {{ p.status='fail'; p.pct=0; resolve(false); }};
+    xhr.send(fd);
+  }});
+}}
+
+up.onclick = async () => {{
+  if (sending) return;
+  const queue = picked.filter(p => p.status==='wait' || p.status==='fail');
+  if (!queue.length) return;
+  sending = true; msg.innerHTML=''; refresh();
+  let okCount = 0, failCount = 0, lastErr = '';
+  for (const p of queue) {{
+    p.status = 'send'; p.pct = 0; refresh();
+    const file = await prepare(p);
+    const ok = await uploadOne(p, file);
+    if (ok) okCount++; else {{ failCount++; if (p.err) lastErr = p.err; }}
+    refresh();
+  }}
+  sending = false;
+  picked = picked.filter(p => p.status !== 'done');   // 성공분 제거, 실패분만 남김
+  refresh();
+  let h = '<span class="ok">✅ ' + okCount + '개 업로드 완료!</span>';
+  if (failCount) h += '<br><span class="err">실패 ' + failCount + '건'
+                    + (lastErr ? ' (' + lastErr.replace(/</g,'&lt;') + ')' : '')
+                    + ' — 다시 [업로드]를 누르면 실패분만 재시도합니다.</span>';
+  msg.innerHTML = h;
+}};
+
 $('#btnCam').onclick = () => $('#cam').click();
 $('#btnGal').onclick = () => $('#gal').click();
 $('#btnDoc').onclick = () => $('#doc').click();
 $('#cam').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
 $('#gal').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
 $('#doc').onchange = e => {{ addFiles(e.target.files); e.target.value = ''; }};
-
-up.onclick = async () => {{
-  if (!picked.length) return;
-  const fd = new FormData();
-  for (const f of picked) fd.append('files', f);
-  up.disabled = true; msg.innerHTML = '<span class="hint">업로드 중...</span>';
-  try {{
-    const r = await fetch('/u/' + token + '/upload', {{ method: 'POST', body: fd }});
-    const j = await r.json();
-    let h = '<span class="ok">✅ ' + j.uploaded + '개 업로드 완료!</span>';
-    if (j.errors && j.errors.length) h += '<br><span class="err">실패 ' + j.errors.length + '건: ' + j.errors.join(', ') + '</span>';
-    msg.innerHTML = h;
-    picked = []; refresh();
-  }} catch (err) {{
-    msg.innerHTML = '<span class="err">업로드 실패: ' + err + '</span>';
-  }} finally {{ up.disabled = picked.length === 0; }}
-}};
 </script>
 </body></html>"""
 
