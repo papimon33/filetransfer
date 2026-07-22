@@ -207,12 +207,15 @@ public class SyncUI : Form {
     // 생성자에서 Hide()/BeginInvoke 를 부르면 핸들 미생성으로 예외 → 프로세스 즉사하므로 여기서 처리.
     bool startHidden;
     protected override void SetVisibleCore(bool value) {
-        if (startHidden) {
+        // /tray 로 시작하면 첫 표시만 건너뛰고 트레이에 상주.
+        // ShowInTaskbar 를 여기서 건드리면 핸들이 재생성돼 이후 창 복원이 깨지므로 손대지 않는다.
+        if (startHidden && !IsHandleCreated) {
             startHidden = false;
-            if (!IsHandleCreated) CreateHandle();   // 핸들만 생성(화면 표시 X)
-            ShowInTaskbar = false;
-            value = false;
+            CreateHandle();               // 메시지 펌프용 핸들만 생성(화면 표시 X)
+            base.SetVisibleCore(false);
+            return;
         }
+        startHidden = false;
         base.SetVisibleCore(value);
     }
 
