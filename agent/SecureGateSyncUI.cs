@@ -764,10 +764,25 @@ public class SyncUI : Form {
                             + " /r:System.Web.Extensions.dll /r:Microsoft.CSharp.dll"
                             + (File.Exists(ico) ? " \"/win32icon:" + ico + "\"" : "")
                             + " \"" + newCs + "\"";
+                // 이전 시도의 잔여물이 남아 있으면 '컴파일 성공'으로 오판해 낡은 exe 를 설치하게 된다 → 먼저 제거
+                try { if (File.Exists(newExe)) File.Delete(newExe); } catch { }
                 var psi = new ProcessStartInfo(csc, args);
                 psi.UseShellExecute = false; psi.CreateNoWindow = true;
-                using (var pc = Process.Start(psi)) pc.WaitForExit(180000);
-                if (!File.Exists(newExe)) throw new Exception("컴파일 실패 — 기존 버전 유지");
+                psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+                int rc = -1; string cscOut = "";
+                using (var pc = Process.Start(psi)) {
+                    cscOut = pc.StandardOutput.ReadToEnd() + pc.StandardError.ReadToEnd();
+                    pc.WaitForExit(180000);
+                    try { rc = pc.ExitCode; } catch { rc = -1; }
+                }
+                if (rc != 0 || !File.Exists(newExe)) {          // 종료코드까지 확인(존재만으로 판단 금지)
+                    string tail = (cscOut ?? "").Trim();
+                    if (tail.Length > 300) tail = tail.Substring(tail.Length - 300);
+                    throw new Exception("컴파일 실패(rc=" + rc + ") — 기존 버전 유지 " + tail);
+                }
+                // 새로 만든 exe 가 방금 컴파일된 것인지 최종 확인
+                if ((DateTime.Now - File.GetLastWriteTime(newExe)).TotalMinutes > 5)
+                    throw new Exception("컴파일 산출물이 최신이 아님 — 기존 버전 유지");
 
                 // 실행 중인 exe 는 덮어쓸 수 없지만 이름 변경은 가능
                 if (File.Exists(oldExe)) { try { File.Delete(oldExe); } catch { } }
