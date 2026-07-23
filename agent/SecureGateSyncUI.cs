@@ -309,7 +309,7 @@ public class SyncUI : Form {
             try {
                 var data = new NameValueCollection(); data["sabeon"] = sb; data["pin"] = pn;
                 byte[] resp;
-                using (var wc = new WebClient()) resp = wc.UploadValues(server + "/api/enroll", data);
+                using (var wc = new TimedWebClient(30000)) resp = wc.UploadValues(server + "/api/enroll", data);
                 var js = new JavaScriptSerializer();
                 var o = (Dictionary<string, object>)js.DeserializeObject(Encoding.UTF8.GetString(resp));
                 if (o != null && Convert.ToBoolean(o["ok"])) {
@@ -346,13 +346,22 @@ public class SyncUI : Form {
         });
     }
 
+    // QR 은 반드시 백그라운드에서 받는다.
+    // (UI 스레드에서 동기 다운로드하면 서버 콜드스타트/지연 시 앱 전체가 멈춤 — 실제 장애 원인이었음)
     void LoadQr() {
         if (string.IsNullOrEmpty(token)) return;
-        try {
-            byte[] b; using (var wc = new WebClient()) b = wc.DownloadData(server + "/u/" + token + "/qr.png");
-            picQr.Image = Image.FromStream(new MemoryStream(b));
-            lblUrl.Text = server + "/u/" + token;
-        } catch (Exception e) { Log("QR 로드 실패: " + e.Message); }
+        string url = server + "/u/" + token + "/qr.png";
+        lblUrl.Text = server + "/u/" + token;      // 텍스트는 즉시(UI 스레드에서 호출됨)
+        ThreadPool.QueueUserWorkItem(_ => {
+            try {
+                byte[] b;
+                using (var wc = new TimedWebClient(20000)) b = wc.DownloadData(url);
+                Image img = Image.FromStream(new MemoryStream(b));
+                for (int i = 0; i < 100 && !IsHandleCreated && running; i++) Thread.Sleep(100);
+                if (!IsHandleCreated) return;
+                try { BeginInvoke((Action)(() => { picQr.Image = img; })); } catch { }
+            } catch (Exception e) { Log("QR 로드 실패: " + e.Message); }
+        });
     }
 
     // ── 동기화 루프 ──
@@ -699,7 +708,7 @@ public class SyncUI : Form {
         ThreadPool.QueueUserWorkItem(_ => {
             try {
                 string body;
-                using (var wc = new WebClient()) { wc.Encoding = Encoding.UTF8; body = wc.DownloadString(server + "/agent/version"); }
+                using (var wc = new TimedWebClient(30000)) { wc.Encoding = Encoding.UTF8; body = wc.DownloadString(server + "/agent/version"); }
                 var o = new JavaScriptSerializer().DeserializeObject(body) as Dictionary<string, object>;
                 if (o == null || !o.ContainsKey("sha256")) return;
                 string sha = Convert.ToString(o["sha256"]);
@@ -748,7 +757,7 @@ public class SyncUI : Form {
                 // 바이트로 받아 그대로 저장 + 그 바이트의 해시를 기록 → 서버가 계산하는 해시와 정확히 일치
                 // (알림 시점 해시가 아니라 '실제 받은 소스' 해시라, 받는 도중 서버가 또 배포돼도 재알림 없음)
                 byte[] srcBytes;
-                using (var wc = new WebClient()) srcBytes = wc.DownloadData(server + "/agent/source.cs");
+                using (var wc = new TimedWebClient(120000)) srcBytes = wc.DownloadData(server + "/agent/source.cs");
                 if (srcBytes.Length < 1000) throw new Exception("소스가 비정상적으로 짧음");
                 string builtSha = Sha256Hex(srcBytes);
                 File.WriteAllBytes(newCs, srcBytes);
@@ -821,6 +830,22 @@ public class SyncUI : Form {
     }
     void SetStatus(string s) {
         try { if (lblStatus != null && lblStatus.IsHandleCreated) lblStatus.BeginInvoke((Action)(() => lblStatus.Text = s)); else if (lblStatus != null) lblStatus.Text = s; } catch { }
+    }
+}
+
+// 타임아웃이 걸린 WebClient — 기본 WebClient 는 상황에 따라 무한정 대기할 수 있어
+// 네트워크 지연 시 스레드가 영구히 묶이는 것을 막는다.
+class TimedWebClient : WebClient {
+    readonly int ms;
+    public TimedWebClient(int timeoutMs) { ms = timeoutMs; }
+    protected override WebRequest GetWebRequest(Uri address) {
+        WebRequest r = base.GetWebRequest(address);
+        if (r != null) {
+            r.Timeout = ms;
+            var h = r as HttpWebRequest;
+            if (h != null) { h.ReadWriteTimeout = ms; }
+        }
+        return r;
     }
 }
 
