@@ -91,6 +91,7 @@ public class SyncUI : Form {
         StartUpdateChecker();
         StartFolderWatch();
         StartDownloadWatch();
+        StartWatchdog();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
             SetEnrolledUi(true);            // 이미 등록됨 → 사번/PIN 잠그고 버튼 "재발급"
@@ -204,7 +205,7 @@ public class SyncUI : Form {
         tray.ContextMenu = menu;
         tray.DoubleClick += (s, e) => ShowWindow();
         // 최소화(_)는 기본 동작 유지 → 작업표시줄에 남음. 닫기(X)만 트레이로 보냄.
-        FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; tray.ShowBalloonTip(1500, "SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료하려면 트레이 아이콘 우클릭 → 종료.", ToolTipIcon.Info); } };
+        FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; ShowNotifyToast("SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료: 트레이 아이콘 우클릭 → 종료"); } };
     }
     void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
 
@@ -250,6 +251,41 @@ public class SyncUI : Form {
         p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
         p.CloseFigure();
         return p;
+    }
+
+    // ── UI 행(hang) 워치독 ─────────────────────────────────────────
+    // UI 스레드에 하트비트를 보내고, 일정 시간 응답이 없으면 로그를 남기고 스스로 재시작한다.
+    // (원인 미상의 블록이 또 생겨도 앱이 죽은 채 방치되지 않도록 하는 최후의 안전망)
+    volatile int uiBeat;
+    void StartWatchdog() {
+        var t = new Thread(() => {
+            int miss = 0;
+            int lastTick = Environment.TickCount;
+            while (running) {
+                Thread.Sleep(15000);
+                int now = Environment.TickCount;
+                bool resumed = (now - lastTick) > 45000;   // 절전/최대절전 복귀 → 오탐 방지
+                lastTick = now;
+                if (resumed || updateBusy || !IsHandleCreated) { miss = 0; continue; }
+                int before = uiBeat;
+                try { BeginInvoke((Action)(() => { uiBeat++; })); } catch { miss = 0; continue; }
+                Thread.Sleep(5000);
+                if (uiBeat != before) { miss = 0; continue; }
+                miss++;
+                Log("경고: UI 하트비트 무응답 " + miss + "회");
+                if (miss >= 3) {                             // 약 60초+ 확정 행
+                    Log("UI 행(hang) 감지 — 앱을 자동 재시작합니다");
+                    try {
+                        var psi = new ProcessStartInfo("cmd.exe",
+                            "/c ping -n 4 127.0.0.1 >nul & start \"\" \"" + Application.ExecutablePath + "\" /tray");
+                        psi.UseShellExecute = false; psi.CreateNoWindow = true;
+                        Process.Start(psi);                  // 3초 뒤 새 인스턴스 기동(우리가 죽은 뒤 뮤텍스 해제됨)
+                    } catch { }
+                    Environment.Exit(2);
+                }
+            }
+        });
+        t.IsBackground = true; t.Start();
     }
 
     // 중복 실행 시 두 번째 인스턴스가 보낸 신호를 받아 창을 앞으로
@@ -667,12 +703,37 @@ public class SyncUI : Form {
         ThreadPool.QueueUserWorkItem(_ => Feed(new List<string> { filePath }));
     }
 
-    /// 윈도우 알림(트레이 풍선) — UI 스레드로 마샬링. 5초 후 사라짐.
+    /// 알림(우하단 자체 토스트) — 어느 스레드에서 불러도 안전. 5초 후 사라짐.
+    /// ※ NotifyIcon.ShowBalloonTip 은 셸(작업표시줄)에 타임아웃 없는 SendMessage 를 보내
+    ///   셸이 바쁘면 UI 스레드가 무기한 블록됨(실제 행 2회의 원인) → 풍선 알림 전면 금지.
     void Notify(string title, string text) {
         Log(title + " — " + text);
-        try { BeginInvoke((Action)(() => {
-            try { tray.ShowBalloonTip(5000, title, text, ToolTipIcon.Info); } catch { }
-        })); } catch { }
+        try { if (IsHandleCreated) BeginInvoke((Action)(() => ShowNotifyToast(title, text))); } catch { }
+    }
+
+    // 버튼 없는 정보 토스트 — 클릭하거나 5초 지나면 닫힘. (반드시 UI 스레드에서 호출)
+    void ShowNotifyToast(string title, string text) {
+        try {
+            var f = new ToastForm();
+            f.Size = new Size(330, 84);
+            f.BackColor = Color.FromArgb(31, 41, 55);
+            var l1 = new Label { Text = title, ForeColor = Color.White,
+                                 Font = new Font("Malgun Gothic", 9.5F, FontStyle.Bold),
+                                 Location = new Point(12, 10), Size = new Size(306, 20), AutoEllipsis = true };
+            var l2 = new Label { Text = (text ?? "").Replace("\n", "  "), ForeColor = Color.FromArgb(209, 213, 219),
+                                 Font = new Font("Malgun Gothic", 8.5F),
+                                 Location = new Point(12, 34), Size = new Size(306, 40), AutoEllipsis = true };
+            var timer = new System.Windows.Forms.Timer { Interval = 5000 };
+            Action close = () => { try { timer.Stop(); toasts.Remove(f); f.Close(); RepositionToasts(); } catch { } };
+            timer.Tick += (s, e) => close();
+            EventHandler clickClose = (s, e) => close();
+            f.Click += clickClose; l1.Click += clickClose; l2.Click += clickClose;
+            f.Controls.AddRange(new Control[] { l1, l2 });
+            toasts.Add(f);
+            PositionToast(f);
+            f.Show();
+            timer.Start();
+        } catch { }
     }
 
     /// 알림에 넣을 파일명 목록 — 너무 길지 않게 앞 max개만, 나머지는 "외 N건"
@@ -725,8 +786,7 @@ public class SyncUI : Form {
                     try { BeginInvoke((Action)(() => {
                         lblUpdate.Text = "🔔 새 버전 v" + ver + " 사용 가능";
                         lblUpdate.Visible = true; btnUpdate.Visible = true; btnUpdate.Enabled = true;
-                        try { tray.ShowBalloonTip(4000, "SecureGate 자동전송",
-                              "새 버전 v" + ver + " 이 있습니다. 앱을 열어 [지금 업데이트]를 누르세요.", ToolTipIcon.Info); } catch { }
+                        ShowNotifyToast("SecureGate 자동전송", "새 버전 v" + ver + " — 앱을 열어 [지금 업데이트]를 누르세요");
                     })); } catch { }
                 } else if (!silent) Log("최신 버전입니다 (v" + ver + ")");
             } catch (Exception e) { if (!silent) Log("업데이트 확인 실패: " + e.Message); }
@@ -780,8 +840,15 @@ public class SyncUI : Form {
                 psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
                 int rc = -1; string cscOut = "";
                 using (var pc = Process.Start(psi)) {
-                    cscOut = pc.StandardOutput.ReadToEnd() + pc.StandardError.ReadToEnd();
-                    pc.WaitForExit(180000);
+                    // stderr 는 별도 스레드에서 읽음 — 순차 ReadToEnd 는 파이프 버퍼가 차면
+                    // csc 와 서로 기다리는 데드락이 됨. 타임아웃 시 csc 를 강제 종료(좀비 방지).
+                    string so = "", se = "";
+                    var tErr = new Thread(() => { try { se = pc.StandardError.ReadToEnd(); } catch { } });
+                    tErr.IsBackground = true; tErr.Start();
+                    try { so = pc.StandardOutput.ReadToEnd(); } catch { }
+                    if (!pc.WaitForExit(180000)) { try { pc.Kill(); } catch { } }
+                    tErr.Join(5000);
+                    cscOut = so + se;
                     try { rc = pc.ExitCode; } catch { rc = -1; }
                 }
                 if (rc != 0 || !File.Exists(newExe)) {          // 종료코드까지 확인(존재만으로 판단 금지)
@@ -823,9 +890,10 @@ public class SyncUI : Form {
     }
 
     // ── 로그/상태 ──
+    static readonly object _logLock = new object();
     void Log(string msg) {
         string line = DateTime.Now.ToString("HH:mm:ss") + "  " + msg;
-        try { File.AppendAllText(logPath, line + "\r\n", new UTF8Encoding(false)); } catch { }
+        try { lock (_logLock) File.AppendAllText(logPath, line + "\r\n", new UTF8Encoding(false)); } catch { }
         try { if (txtLog != null && txtLog.IsHandleCreated) txtLog.BeginInvoke((Action)(() => { txtLog.AppendText(line + "\r\n"); })); } catch { }
     }
     void SetStatus(string s) {
