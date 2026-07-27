@@ -41,9 +41,12 @@ public class SyncUI : Form {
     Button btnUpdate;
     PictureBox picQr;
     CheckBox chkAuto, chkSend, chkAsk;
-    NotifyIcon tray;
+    volatile NotifyIcon tray;
     Thread syncThread;
     volatile bool running = true;
+    System.Windows.Forms.Timer beatTimer;
+    volatile int uiHeartbeat;        // UI 스레드가 스스로 증가(워치독이 읽기만 함)
+    volatile int uiBeatTick;
 
     const string MUTEX_NAME = "SecureGateSyncUI_SingleInstance";
     const string EVENT_NAME = "SecureGateSyncUI_ShowWindow";
@@ -87,6 +90,7 @@ public class SyncUI : Form {
         logPath = Path.Combine(dir, "ui.log");
         LoadConfig();
         BuildUi();
+        StartTrayThread();
         StartShowListener();
         StartUpdateChecker();
         StartFolderWatch();
@@ -198,14 +202,63 @@ public class SyncUI : Form {
                                           picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkAsk,
                                           lblUpdate, btnUpdate, txtLog });
 
-        tray = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송", Visible = true };
-        var menu = new ContextMenu();
-        menu.MenuItems.Add("열기", (s, e) => ShowWindow());
-        menu.MenuItems.Add("종료", (s, e) => { running = false; tray.Visible = false; Application.Exit(); });
-        tray.ContextMenu = menu;
-        tray.DoubleClick += (s, e) => ShowWindow();
+        // 트레이 아이콘은 '전용 스레드'에서 만든다 → StartTrayThread()
+        // (Shell_NotifyIcon 은 셸에 동기 메시지를 보내므로, 로그온 직후처럼 셸이 바쁘면
+        //  호출 스레드가 무기한 멈춘다. 메인 UI 스레드에서 만들면 앱 전체가 얼어붙음 — 실제 장애 원인)
+
+        // UI 생존 하트비트(워치독이 읽음). 크로스스레드 호출 없이 UI 스레드가 스스로 갱신.
+        beatTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        beatTimer.Tick += (s, e) => { uiHeartbeat++; uiBeatTick = Environment.TickCount; };
+        beatTimer.Start();
+
         // 최소화(_)는 기본 동작 유지 → 작업표시줄에 남음. 닫기(X)만 트레이로 보냄.
         FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; ShowNotifyToast("SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료: 트레이 아이콘 우클릭 → 종료"); } };
+    }
+
+    // ── 트레이 아이콘: 전용 스레드 + 전용 메시지 루프 ──────────────────
+    // 셸이 응답하지 않아 이 스레드가 막히더라도 메인 UI(창/동기화)는 정상 동작한다.
+    Thread trayThread;
+    volatile bool trayReady;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowW(string cls, string title);
+
+    void StartTrayThread() {
+        trayThread = new Thread(() => {
+            try {
+                // 로그온 직후엔 탐색기 작업표시줄이 아직 없을 수 있다. 준비될 때까지 대기(최대 90초).
+                for (int i = 0; i < 180 && running; i++) {
+                    if (FindWindowW("Shell_TrayWnd", null) != IntPtr.Zero) break;
+                    Thread.Sleep(500);
+                }
+                Thread.Sleep(1500);                      // 셸이 초기화를 끝낼 여유
+
+                var ni = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송" };
+                var menu = new ContextMenu();
+                menu.MenuItems.Add("열기", (s, e) => RequestShowWindow());
+                menu.MenuItems.Add("종료", (s, e) => RequestExit());
+                ni.ContextMenu = menu;
+                ni.DoubleClick += (s, e) => RequestShowWindow();
+                tray = ni;
+                try { ni.Visible = true; } catch { }
+                trayReady = true;
+                Application.Run(new ApplicationContext());   // 이 스레드 전용 메시지 루프
+            } catch (Exception e) { Log("트레이 스레드 오류: " + e.Message); }
+        });
+        trayThread.IsBackground = true;
+        trayThread.SetApartmentState(ApartmentState.STA);
+        trayThread.Start();
+    }
+
+    // 트레이 스레드 → 메인 UI 로 요청(메인이 막혀 있어도 트레이 스레드는 안 막힘)
+    void RequestShowWindow() {
+        try { if (IsHandleCreated) BeginInvoke((Action)(() => ShowWindow())); } catch { }
+    }
+    void RequestExit() {
+        running = false;
+        try { if (tray != null) tray.Visible = false; } catch { }
+        try { if (IsHandleCreated) BeginInvoke((Action)(() => Application.Exit())); } catch { }
+        // 메인 UI 가 막혀 있어도 반드시 종료되도록 보강
+        var t = new Thread(() => { Thread.Sleep(3000); Environment.Exit(0); });
+        t.IsBackground = true; t.Start();
     }
     void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
 
@@ -256,7 +309,8 @@ public class SyncUI : Form {
     // ── UI 행(hang) 워치독 ─────────────────────────────────────────
     // UI 스레드에 하트비트를 보내고, 일정 시간 응답이 없으면 로그를 남기고 스스로 재시작한다.
     // (원인 미상의 블록이 또 생겨도 앱이 죽은 채 방치되지 않도록 하는 최후의 안전망)
-    volatile int uiBeat;
+    // 하트비트는 UI 스레드의 Timer 가 스스로 올린다. 워치독은 '읽기만' 하므로
+    // BeginInvoke·락 등 어떤 크로스스레드 호출에도 의존하지 않는다(이전 워치독이 무력화된 이유).
     void StartWatchdog() {
         var t = new Thread(() => {
             int miss = 0;
@@ -264,28 +318,38 @@ public class SyncUI : Form {
             while (running) {
                 Thread.Sleep(15000);
                 int now = Environment.TickCount;
-                bool resumed = (now - lastTick) > 45000;   // 절전/최대절전 복귀 → 오탐 방지
+                bool resumed = (now - lastTick) > 60000;   // 절전/최대절전 복귀 → 오탐 방지
                 lastTick = now;
-                if (resumed || updateBusy || !IsHandleCreated) { miss = 0; continue; }
-                int before = uiBeat;
-                try { BeginInvoke((Action)(() => { uiBeat++; })); } catch { miss = 0; continue; }
-                Thread.Sleep(5000);
-                if (uiBeat != before) { miss = 0; continue; }
+                if (resumed || updateBusy || beatTimer == null || !IsHandleCreated) { miss = 0; continue; }
+
+                // 트레이 스레드가 죽었으면(셸 이상 등) 아이콘이 사라진 상태 → 다시 만든다
+                if (trayThread != null && !trayThread.IsAlive) {
+                    Log("트레이 아이콘이 사라짐 — 다시 등록합니다");
+                    trayReady = false;
+                    try { StartTrayThread(); } catch { }
+                }
+
+                int idle = now - uiBeatTick;               // 마지막 하트비트 이후 경과(ms)
+                if (idle < 12000) { miss = 0; continue; }
                 miss++;
-                Log("경고: UI 하트비트 무응답 " + miss + "회");
-                if (miss >= 3) {                             // 약 60초+ 확정 행
+                Log("경고: UI 무응답 " + miss + "회 (" + (idle / 1000) + "초째)");
+                if (miss >= 3) {                           // 약 45초+ 확정 행
                     Log("UI 행(hang) 감지 — 앱을 자동 재시작합니다");
-                    try {
-                        var psi = new ProcessStartInfo("cmd.exe",
-                            "/c ping -n 4 127.0.0.1 >nul & start \"\" \"" + Application.ExecutablePath + "\" /tray");
-                        psi.UseShellExecute = false; psi.CreateNoWindow = true;
-                        Process.Start(psi);                  // 3초 뒤 새 인스턴스 기동(우리가 죽은 뒤 뮤텍스 해제됨)
-                    } catch { }
-                    Environment.Exit(2);
+                    RestartSelf();
                 }
             }
         });
         t.IsBackground = true; t.Start();
+    }
+
+    void RestartSelf() {
+        try {
+            var psi = new ProcessStartInfo("cmd.exe",
+                "/c ping -n 4 127.0.0.1 >nul & start \"\" \"" + Application.ExecutablePath + "\" /tray");
+            psi.UseShellExecute = false; psi.CreateNoWindow = true;
+            Process.Start(psi);            // 3초 뒤 새 인스턴스 기동(우리가 죽어 뮤텍스가 풀린 뒤)
+        } catch { }
+        Environment.Exit(2);
     }
 
     // 중복 실행 시 두 번째 인스턴스가 보낸 신호를 받아 창을 앞으로
@@ -481,7 +545,18 @@ public class SyncUI : Form {
     [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l,
+                                                                      uint flags, uint timeout, out IntPtr result);
+    const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    /// 다른 프로세스(SecureGate)로 보내는 동기 메시지는 반드시 타임아웃을 건다.
+    /// 상대가 멈추면 SendMessage 는 영원히 돌아오지 않아 우리 스레드까지 묶인다.
+    static int SendMsgTimed(IntPtr h, uint msg, int timeoutMs, int failValue) {
+        IntPtr res;
+        IntPtr ok = SendMessageTimeout(h, msg, IntPtr.Zero, IntPtr.Zero,
+                                       SMTO_ABORTIFHUNG, (uint)timeoutMs, out res);
+        return ok == IntPtr.Zero ? failValue : res.ToInt32();
+    }
     [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
 
     const int  ID_SEND = 3006;             // [파일보내기] 버튼
@@ -542,20 +617,21 @@ public class SyncUI : Form {
 
                 int last = -1; DateTime stableSince = DateTime.Now;
                 while (DateTime.Now < deadline) {
-                    int cnt = SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                    int cnt = SendMsgTimed(lv, LVM_GETITEMCOUNT, 5000, -1);
+                    if (cnt < 0) { Thread.Sleep(500); continue; }   // 응답 없음 → 다음 회차 재시도
                     if (cnt != last) {                       // 아직 등록 중(대용량이면 오래 걸림)
                         last = cnt; stableSince = DateTime.Now;
                         Log("자동보내기: 목록 " + cnt + "건 등록중...");
                     } else if (cnt > 0 && IsWindowEnabled(btn)
                                && (DateTime.Now - stableSince).TotalSeconds >= autoSendStableSec) {
-                        SendMessage(btn, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+                        SendMsgTimed(btn, BM_CLICK, 15000, -1);
                         Log("자동보내기: [파일보내기] 클릭 — " + cnt + "건");
                         // SecureGate 가 목록을 비우면 접수된 것 → 그때 완료 알림
                         bool accepted = false;
                         DateTime until = DateTime.Now.AddSeconds(120);
                         while (DateTime.Now < until) {
                             Thread.Sleep(1000);
-                            int now = SendMessage(lv, LVM_GETITEMCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+                            int now = SendMsgTimed(lv, LVM_GETITEMCOUNT, 5000, cnt);
                             if (now < cnt) { accepted = true; break; }
                         }
                         if (accepted)
@@ -893,7 +969,12 @@ public class SyncUI : Form {
     static readonly object _logLock = new object();
     void Log(string msg) {
         string line = DateTime.Now.ToString("HH:mm:ss") + "  " + msg;
-        try { lock (_logLock) File.AppendAllText(logPath, line + "\r\n", new UTF8Encoding(false)); } catch { }
+        // 잠금 대기에 상한을 둔다 — 다른 스레드가 물고 늘어져도 로깅이(특히 워치독이) 영구히 막히지 않도록.
+        bool got = false;
+        try {
+            got = Monitor.TryEnter(_logLock, 2000);
+            if (got) File.AppendAllText(logPath, line + "\r\n", new UTF8Encoding(false));
+        } catch { } finally { if (got) Monitor.Exit(_logLock); }
         try { if (txtLog != null && txtLog.IsHandleCreated) txtLog.BeginInvoke((Action)(() => { txtLog.AppendText(line + "\r\n"); })); } catch { }
     }
     void SetStatus(string s) {
