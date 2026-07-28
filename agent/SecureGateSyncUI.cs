@@ -470,8 +470,11 @@ public class SyncUI : Form {
         syncThread = new Thread(SyncLoop); syncThread.IsBackground = true; syncThread.Start();
     }
     bool wasQuiet = false;
+    int failStreak = 0;              // 연속 실패 횟수(지수 백오프용)
+    string lastFailMsg = "";
     void SyncLoop() {
         while (running) {
+            int wait = intervalMs;
             try {
                 bool quiet = IsQuietHours();
                 if (quiet != wasQuiet) {
@@ -479,9 +482,26 @@ public class SyncUI : Form {
                               : "주간 — 서버 폴링 재개");
                     wasQuiet = quiet;
                 }
-                if (!string.IsNullOrEmpty(token) && !quiet) SyncOnce();
-            } catch (Exception e) { Log("동기화 오류: " + e.Message); }
-            Thread.Sleep(intervalMs);
+                if (!string.IsNullOrEmpty(token) && !quiet) {
+                    SyncOnce();
+                    if (failStreak > 0) { Log("서버 연결 복구됨"); SetStatus("동기화 중 — 폰 업로드를 기다립니다."); }
+                    failStreak = 0; lastFailMsg = "";
+                }
+            } catch (Exception e) {
+                failStreak++;
+                // 서버가 죽었을 때 3초마다 두드리며 로그를 도배하지 않도록:
+                // 재시도 간격을 점점 늘리고(최대 5분), 같은 오류는 처음/10회마다만 기록.
+                string msg = e.Message;
+                if (msg != lastFailMsg || failStreak % 10 == 0) {
+                    Log("동기화 오류(" + failStreak + "회): " + msg);
+                    lastFailMsg = msg;
+                }
+                SetStatus("서버 연결 실패 — 재시도 중(" + failStreak + "회)");
+                int mult = 1;
+                for (int i = 1; i < failStreak && mult < 100; i++) mult *= 2;
+                wait = Math.Min(intervalMs * mult, 300000);      // 3초 → … → 최대 5분
+            }
+            Thread.Sleep(wait);
         }
     }
     // 야간(한국시간 21:00~08:00)엔 서버 폴링을 멈춘다. PC 시간대와 무관하게 UTC+9 로 판정.
