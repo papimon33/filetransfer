@@ -212,7 +212,7 @@ public class SyncUI : Form {
         beatTimer.Start();
 
         // 최소화(_)는 기본 동작 유지 → 작업표시줄에 남음. 닫기(X)만 트레이로 보냄.
-        FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; ShowNotifyToast("SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료: 트레이 아이콘 우클릭 → 종료"); } };
+        FormClosing += (s, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); ShowInTaskbar = false; OnTrayThread(() => ShowNotifyToast("SecureGate 자동전송", "트레이에서 계속 실행됩니다. 종료: 트레이 아이콘 우클릭 → 종료")); } };
     }
 
     // ── 트레이 아이콘: 전용 스레드 + 전용 메시지 루프 ──────────────────
@@ -220,6 +220,8 @@ public class SyncUI : Form {
     Thread trayThread;
     volatile bool trayReady;
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowW(string cls, string title);
+
+    volatile Form trayPump;      // 트레이 스레드 소유 히든 폼 — 토스트를 여기로 마샬링
 
     void StartTrayThread() {
         trayThread = new Thread(() => {
@@ -231,6 +233,9 @@ public class SyncUI : Form {
                 }
                 Thread.Sleep(1500);                      // 셸이 초기화를 끝낼 여유
 
+                var pump = new PumpForm();               // 이 스레드의 메시지 루프 주인(화면 표시 없음)
+                trayPump = pump;
+
                 var ni = new NotifyIcon { Icon = appIcon ?? SystemIcons.Application, Text = "SecureGate 자동전송" };
                 var menu = new ContextMenu();
                 menu.MenuItems.Add("열기", (s, e) => RequestShowWindow());
@@ -240,12 +245,20 @@ public class SyncUI : Form {
                 tray = ni;
                 try { ni.Visible = true; } catch { }
                 trayReady = true;
-                Application.Run(new ApplicationContext());   // 이 스레드 전용 메시지 루프
+                Application.Run(pump);                   // 이 스레드 전용 메시지 루프
             } catch (Exception e) { Log("트레이 스레드 오류: " + e.Message); }
+            finally { trayPump = null; trayReady = false; }
         });
         trayThread.IsBackground = true;
         trayThread.SetApartmentState(ApartmentState.STA);
         trayThread.Start();
+    }
+
+    /// 토스트/알림은 트레이 스레드에서 그린다.
+    /// 창 생성·표시는 셸 훅을 건드리므로, 메인 UI 스레드에서 하면 셸이 꼬였을 때 앱이 얼어붙는다.
+    /// 트레이 스레드는 막혀도 워치독이 다시 만들면 되는 '버려도 되는' 스레드다.
+    void OnTrayThread(Action a) {
+        try { var pf = trayPump; if (pf != null && pf.IsHandleCreated) pf.BeginInvoke(a); } catch { }
     }
 
     // 트레이 스레드 → 메인 UI 로 요청(메인이 막혀 있어도 트레이 스레드는 안 막힘)
@@ -253,12 +266,19 @@ public class SyncUI : Form {
         try { if (IsHandleCreated) BeginInvoke((Action)(() => ShowWindow())); } catch { }
     }
     void RequestExit() {
+        exitRequested = true;
         running = false;
         try { if (tray != null) tray.Visible = false; } catch { }
         try { if (IsHandleCreated) BeginInvoke((Action)(() => Application.Exit())); } catch { }
-        // 메인 UI 가 막혀 있어도 반드시 종료되도록 보강
-        var t = new Thread(() => { Thread.Sleep(3000); Environment.Exit(0); });
+        // 메인 UI 가 막혀 있으면 정상 종료가 안 된다. Environment.Exit 도 종료 절차를 타느라
+        // 함께 막힐 수 있으므로, 최후에는 절대 막히지 않는 Kill 로 확실히 끝낸다.
+        var t = new Thread(() => { Thread.Sleep(3000); HardKill(); });
         t.IsBackground = true; t.Start();
+    }
+    volatile bool exitRequested;
+    static void HardKill() {
+        try { Process.GetCurrentProcess().Kill(); } catch { }
+        try { Environment.Exit(0); } catch { }
     }
     void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
 
@@ -313,13 +333,20 @@ public class SyncUI : Form {
     // BeginInvoke·락 등 어떤 크로스스레드 호출에도 의존하지 않는다(이전 워치독이 무력화된 이유).
     void StartWatchdog() {
         var t = new Thread(() => {
-            int miss = 0;
+            int miss = 0, exitWait = 0;
             int lastTick = Environment.TickCount;
-            while (running) {
+            // running 이 false 여도 계속 돈다 — '종료 요청했는데 안 죽는' 상황까지 책임진다.
+            while (true) {
                 Thread.Sleep(15000);
                 int now = Environment.TickCount;
                 bool resumed = (now - lastTick) > 60000;   // 절전/최대절전 복귀 → 오탐 방지
                 lastTick = now;
+
+                if (exitRequested) {                        // 종료를 눌렀는데 프로세스가 안 죽는 경우
+                    if (++exitWait >= 2) { Log("종료가 지연됨 — 강제 종료합니다"); HardKill(); }
+                    continue;
+                }
+                if (!running) continue;
                 if (resumed || updateBusy || beatTimer == null || !IsHandleCreated) { miss = 0; continue; }
 
                 // 트레이 스레드가 죽었으면(셸 이상 등) 아이콘이 사라진 상태 → 다시 만든다
@@ -349,7 +376,9 @@ public class SyncUI : Form {
             psi.UseShellExecute = false; psi.CreateNoWindow = true;
             Process.Start(psi);            // 3초 뒤 새 인스턴스 기동(우리가 죽어 뮤텍스가 풀린 뒤)
         } catch { }
-        Environment.Exit(2);
+        // Environment.Exit 는 종료 절차(파이널라이저 등)를 타므로 UI 가 막힌 상태에서 함께 멈출 수 있다.
+        // Kill 은 커널이 즉시 끝내므로 어떤 경우에도 막히지 않는다.
+        HardKill();
     }
 
     // 중복 실행 시 두 번째 인스턴스가 보낸 신호를 받아 창을 앞으로
@@ -746,7 +775,7 @@ public class SyncUI : Form {
                             if (!IsFileReady(f)) continue;             // 아직 받는 중
                             seen.Add(f); sizes.Remove(f);
                             string path = f;
-                            try { BeginInvoke((Action)(() => ShowTransferToast(path))); } catch { }
+                            OnTrayThread(() => ShowTransferToast(path));
                         }
                     }
                 } catch (Exception e) { Log("다운로드 감시 오류: " + e.Message); }
@@ -805,7 +834,7 @@ public class SyncUI : Form {
     ///   셸이 바쁘면 UI 스레드가 무기한 블록됨(실제 행 2회의 원인) → 풍선 알림 전면 금지.
     void Notify(string title, string text) {
         Log(title + " — " + text);
-        try { if (IsHandleCreated) BeginInvoke((Action)(() => ShowNotifyToast(title, text))); } catch { }
+        OnTrayThread(() => ShowNotifyToast(title, text));
     }
 
     // 버튼 없는 정보 토스트 — 클릭하거나 5초 지나면 닫힘. (반드시 UI 스레드에서 호출)
@@ -883,7 +912,7 @@ public class SyncUI : Form {
                     try { BeginInvoke((Action)(() => {
                         lblUpdate.Text = "🔔 새 버전 v" + ver + " 사용 가능";
                         lblUpdate.Visible = true; btnUpdate.Visible = true; btnUpdate.Enabled = true;
-                        ShowNotifyToast("SecureGate 자동전송", "새 버전 v" + ver + " — 앱을 열어 [지금 업데이트]를 누르세요");
+                        OnTrayThread(() => ShowNotifyToast("SecureGate 자동전송", "새 버전 v" + ver + " — 앱을 열어 [지금 업데이트]를 누르세요"));
                     })); } catch { }
                 } else if (!silent) Log("최신 버전입니다 (v" + ver + ")");
             } catch (Exception e) { if (!silent) Log("업데이트 확인 실패: " + e.Message); }
@@ -1000,6 +1029,23 @@ public class SyncUI : Form {
     }
     void SetStatus(string s) {
         try { if (lblStatus != null && lblStatus.IsHandleCreated) lblStatus.BeginInvoke((Action)(() => lblStatus.Text = s)); else if (lblStatus != null) lblStatus.Text = s; } catch { }
+    }
+}
+
+// 트레이 스레드의 메시지 루프 주인 — 화면에 절대 나타나지 않는 폼.
+// 토스트를 이 스레드로 마샬링하기 위한 핸들 제공용.
+class PumpForm : Form {
+    public PumpForm() {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        Opacity = 0;
+        Size = new Size(1, 1);
+        StartPosition = FormStartPosition.Manual;
+        Location = new Point(-32000, -32000);
+    }
+    protected override void SetVisibleCore(bool value) {
+        if (!IsHandleCreated) CreateHandle();     // 핸들만 만들고 표시는 하지 않음
+        base.SetVisibleCore(false);
     }
 }
 
