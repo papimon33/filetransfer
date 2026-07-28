@@ -280,7 +280,16 @@ public class SyncUI : Form {
         try { Process.GetCurrentProcess().Kill(); } catch { }
         try { Environment.Exit(0); } catch { }
     }
-    void ShowWindow() { Show(); WindowState = FormWindowState.Normal; ShowInTaskbar = true; Activate(); BringToFront(); }
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    /// 창 복원. Activate()/BringToFront() 는 셸의 포그라운드 협상을 거치며,
+    /// 트레이 메뉴가 열려 있는 등 셸이 모달 상태면 UI 스레드가 붙잡힐 수 있다.
+    /// 실패해도 그만인 SetForegroundWindow 만 쓰고, 창 표시 자체는 로컬 연산으로 끝낸다.
+    void ShowWindow() {
+        Show();
+        WindowState = FormWindowState.Normal;
+        ShowInTaskbar = true;
+        try { SetForegroundWindow(Handle); } catch { }
+    }
 
     // 자동시작(/tray): 첫 표시를 건너뛰고 트레이로만 뜸.
     // 생성자에서 Hide()/BeginInvoke 를 부르면 핸들 미생성으로 예외 → 프로세스 즉사하므로 여기서 처리.
@@ -313,9 +322,12 @@ public class SyncUI : Form {
                 using (var b = new SolidBrush(Color.FromArgb(37, 99, 235))) g.FillEllipse(b, 12, 14, 8, 8); // 렌즈 테
                 using (var b = new SolidBrush(Color.White)) g.FillEllipse(b, 14, 16, 4, 4);                  // 렌즈 안
             }
-            return Icon.FromHandle(bmp.GetHicon());
+            IntPtr hIcon = bmp.GetHicon();
+            try { using (var tmp = Icon.FromHandle(hIcon)) return (Icon)tmp.Clone(); }
+            finally { DestroyIcon(hIcon); }        // FromHandle 은 핸들을 소유하지 않음 → 직접 해제
         }
     }
+    [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
     static GraphicsPath RoundRect(Rectangle r, int rad) {
         var p = new GraphicsPath(); int d = rad * 2;
         p.AddArc(r.X, r.Y, d, d, 180, 90);
@@ -395,6 +407,10 @@ public class SyncUI : Form {
     string StartupLnk() { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "SecureGateSync.lnk"); }
 
     void SetAutostart(bool on) {
+        // COM(WScript.Shell) 은 셸을 거치므로 UI 스레드에서 부르면 멈출 수 있다 → 백그라운드에서 처리
+        ThreadPool.QueueUserWorkItem(_ => SetAutostartCore(on));
+    }
+    void SetAutostartCore(bool on) {
         string lnk = StartupLnk();
         try {
             if (!on) { if (File.Exists(lnk)) File.Delete(lnk); Log("자동시작 해제"); return; }
@@ -469,7 +485,8 @@ public class SyncUI : Form {
                 SetStatus("발급 실패: " + msg);
                 Log("발급 실패: " + msg);
                 string m = msg;
-                try { BeginInvoke((Action)(() => MessageBox.Show(m, "발급 실패"))); } catch { }
+                // 모달 MessageBox 는 트레이 모드(창 숨김)에서 보이지 않은 채 UI 스레드를 붙잡을 수 있다 → 토스트로 알림
+                OnTrayThread(() => ShowNotifyToast("발급 실패", m));
             } catch (Exception e) { SetStatus("발급 실패: " + e.Message); Log("발급 실패: " + e.Message); }
             finally { BeginInvoke((Action)(() => btnEnroll.Enabled = true)); }
         });
@@ -488,7 +505,10 @@ public class SyncUI : Form {
                 Image img = Image.FromStream(new MemoryStream(b));
                 for (int i = 0; i < 100 && !IsHandleCreated && running; i++) Thread.Sleep(100);
                 if (!IsHandleCreated) return;
-                try { BeginInvoke((Action)(() => { picQr.Image = img; })); } catch { }
+                try { BeginInvoke((Action)(() => {
+                    var prev = picQr.Image; picQr.Image = img;
+                    if (prev != null) try { prev.Dispose(); } catch { }   // 재발급 반복 시 GDI 누수 방지
+                })); } catch { }
             } catch (Exception e) { Log("QR 로드 실패: " + e.Message); }
         });
     }
@@ -578,8 +598,20 @@ public class SyncUI : Form {
             string lp = Path.Combine(listdir, stamp + ".txt"); int n = 1;
             while (File.Exists(lp)) { lp = Path.Combine(listdir, stamp + "_" + n + ".txt"); n++; }
             File.WriteAllText(lp, string.Join("\r\n", paths.ToArray()) + "\r\n", new UnicodeEncoding(false, true));
-            var psi = new ProcessStartInfo(securegate, "F " + paths.Count + " " + lp); psi.UseShellExecute = true;
-            Process.Start(psi);
+            // UseShellExecute=true 는 ShellExecute(셸)를 타므로 셸이 바쁘면 지연될 수 있어 직접 실행을 먼저 시도.
+            // 다만 SecureGate 가 권한 상승을 요구하는 경우엔 직접 실행이 실패하므로, 그때만 셸 방식으로 되돌린다.
+            string args = "F " + paths.Count + " " + lp;
+            try {
+                var psi = new ProcessStartInfo(securegate, args);
+                psi.UseShellExecute = false;
+                psi.WorkingDirectory = Path.GetDirectoryName(securegate);
+                Process.Start(psi);
+            } catch (Exception ex1) {
+                Log("직접 실행 실패 → 셸 실행으로 재시도: " + ex1.Message);
+                var psi2 = new ProcessStartInfo(securegate, args);
+                psi2.UseShellExecute = true;
+                Process.Start(psi2);
+            }
             Log("SecureGate 투입: " + paths.Count + "장");
             AutoSendWhenReady(paths);
         } catch (Exception e) { Log("SecureGate 투입 실패: " + e.Message); }
@@ -704,11 +736,20 @@ public class SyncUI : Form {
     // · 크기가 안정되고 잠금이 풀린 뒤에만 투입(복사 중인 대용량 파일 방지)
     void StartFolderWatch() {
         var t = new Thread(() => {
-            try { if (Directory.Exists(dest)) foreach (var f in Directory.GetFiles(dest)) fedFiles.Add(f); }
+            try { if (Directory.Exists(dest)) foreach (var f in Directory.GetFiles(dest)) lock (fedFiles) fedFiles.Add(f); }
             catch { }
             var sizes = new Dictionary<string, long>();
             while (running) {
                 try {
+                    // 오래 켜두면 기록이 무한정 쌓인다 → 폴더에 더 이상 없는 항목은 정리
+                    lock (fedFiles) {
+                        if (fedFiles.Count > 2000) {
+                            var alive = new HashSet<string>(
+                                Directory.Exists(dest) ? Directory.GetFiles(dest) : new string[0],
+                                StringComparer.OrdinalIgnoreCase);
+                            fedFiles.RemoveWhere(x => !alive.Contains(x));
+                        }
+                    }
                     if (watchFolder && Directory.Exists(dest)) {
                         var batch = new List<string>();
                         foreach (var f in Directory.GetFiles(dest)) {
@@ -764,7 +805,13 @@ public class SyncUI : Form {
             while (running) {
                 try {
                     if (askDownloads && Directory.Exists(downloadsDir)) {
-                        foreach (var f in Directory.GetFiles(downloadsDir)) {
+                        var cur = Directory.GetFiles(downloadsDir);
+                        if (seen.Count > 5000) {          // 무한 증가 방지: 지금 폴더에 있는 것만 남김
+                            var alive = new HashSet<string>(cur, StringComparer.OrdinalIgnoreCase);
+                            seen.RemoveWhere(x => !alive.Contains(x));
+                            foreach (var k2 in new List<string>(sizes.Keys)) if (!alive.Contains(k2)) sizes.Remove(k2);
+                        }
+                        foreach (var f in cur) {
                             if (seen.Contains(f)) continue;
                             string ext = Path.GetExtension(f).ToLowerInvariant();
                             if (ext == ".crdownload" || ext == ".part" || ext == ".partial"
@@ -800,7 +847,7 @@ public class SyncUI : Form {
                                  FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(37, 99, 235), ForeColor = Color.White };
         btnNo.FlatAppearance.BorderColor = Color.White;
         var timer = new System.Windows.Forms.Timer { Interval = 10000 };     // 10초 후 자동 무시
-        Action close = () => { try { timer.Stop(); toasts.Remove(f); f.Close(); RepositionToasts(); } catch { } };
+        Action close = () => { try { timer.Stop(); timer.Dispose(); toasts.Remove(f); f.Close(); f.Dispose(); RepositionToasts(); } catch { } };
         btnGo.Click += (s, e) => { close(); TransferDownloaded(filePath); };
         btnNo.Click += (s, e) => close();
         timer.Tick += (s, e) => close();
@@ -850,7 +897,7 @@ public class SyncUI : Form {
                                  Font = new Font("Malgun Gothic", 8.5F),
                                  Location = new Point(12, 34), Size = new Size(306, 40), AutoEllipsis = true };
             var timer = new System.Windows.Forms.Timer { Interval = 5000 };
-            Action close = () => { try { timer.Stop(); toasts.Remove(f); f.Close(); RepositionToasts(); } catch { } };
+            Action close = () => { try { timer.Stop(); timer.Dispose(); toasts.Remove(f); f.Close(); f.Dispose(); RepositionToasts(); } catch { } };
             timer.Tick += (s, e) => close();
             EventHandler clickClose = (s, e) => close();
             f.Click += clickClose; l1.Click += clickClose; l2.Click += clickClose;
@@ -1023,12 +1070,30 @@ public class SyncUI : Form {
         bool got = false;
         try {
             got = Monitor.TryEnter(_logLock, 2000);
-            if (got) File.AppendAllText(logPath, line + "\r\n", new UTF8Encoding(false));
+            if (got) {
+                try {   // 로그 파일이 무한정 커지지 않도록 1MB 넘으면 직전 것 하나만 남기고 회전
+                    var fi = new FileInfo(logPath);
+                    if (fi.Exists && fi.Length > 1024 * 1024) {
+                        string bak = logPath + ".1";
+                        if (File.Exists(bak)) File.Delete(bak);
+                        File.Move(logPath, bak);
+                    }
+                } catch { }
+                File.AppendAllText(logPath, line + "\r\n", new UTF8Encoding(false));
+            }
         } catch { } finally { if (got) Monitor.Exit(_logLock); }
-        try { if (txtLog != null && txtLog.IsHandleCreated) txtLog.BeginInvoke((Action)(() => { txtLog.AppendText(line + "\r\n"); })); } catch { }
+        try { if (txtLog != null && txtLog.IsHandleCreated) txtLog.BeginInvoke((Action)(() => {
+            if (txtLog.Lines.Length > 200) {          // 무한히 쌓이면 메모리·렌더링 부담 → 최근 것만 유지
+                var keep = txtLog.Lines; var cut = new string[100];
+                Array.Copy(keep, keep.Length - 100, cut, 0, 100);
+                txtLog.Lines = cut;
+            }
+            txtLog.AppendText(line + "\r\n");
+        })); } catch { }
     }
     void SetStatus(string s) {
-        try { if (lblStatus != null && lblStatus.IsHandleCreated) lblStatus.BeginInvoke((Action)(() => lblStatus.Text = s)); else if (lblStatus != null) lblStatus.Text = s; } catch { }
+        // 핸들 생성 전엔 아무것도 하지 않는다(다른 스레드에서 Text 직접 대입은 불법 크로스스레드 접근).
+        try { if (lblStatus != null && lblStatus.IsHandleCreated) lblStatus.BeginInvoke((Action)(() => lblStatus.Text = s)); } catch { }
     }
 }
 
