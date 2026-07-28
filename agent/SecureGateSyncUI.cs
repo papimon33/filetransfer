@@ -499,7 +499,8 @@ public class SyncUI : Form {
                 SetStatus("서버 연결 실패 — 재시도 중(" + failStreak + "회)");
                 int mult = 1;
                 for (int i = 1; i < failStreak && mult < 100; i++) mult *= 2;
-                wait = Math.Min(intervalMs * mult, 300000);      // 3초 → … → 최대 5분
+                // 최대 60초 — 무료 플랜 콜드스타트(약 1분) 후 아침 첫 동기화가 오래 지연되지 않게.
+                wait = Math.Min(intervalMs * mult, 60000);
             }
             Thread.Sleep(wait);
         }
