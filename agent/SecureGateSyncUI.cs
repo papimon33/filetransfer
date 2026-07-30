@@ -26,10 +26,8 @@ public class SyncUI : Form {
     // 받는 폴더에 직접 넣은 파일도 자동 투입(항상 ON — 옵션 제거됨)
     readonly bool watchFolder = true;
     readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    // 다운로드 폴더 감시 → 새 다운로드마다 [자료전송]/[무시] 토스트.
-    // 기본 OFF — 업데이트만으로 다른 사용자의 화면에 못 보던 알림이 갑자기 뜨면 안 된다.
-    // (이미 켜 둔 PC 는 ui.config 의 askdownloads=true 가 그대로 유지됨)
-    bool askDownloads = false;
+    // 다운로드 폴더 감시 → 새 다운로드마다 [자료전송]/[무시] 토스트(기본 ON)
+    bool askDownloads = true;
     string downloadsDir = "";
     readonly List<Form> toasts = new List<Form>();
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
