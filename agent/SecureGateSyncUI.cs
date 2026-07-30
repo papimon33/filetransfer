@@ -46,7 +46,9 @@ public class SyncUI : Form {
     volatile bool running = true;
     System.Windows.Forms.Timer beatTimer;
     volatile int uiHeartbeat;        // UI 스레드가 스스로 증가(워치독이 읽기만 함)
-    volatile int uiBeatTick;
+    // 단조 증가 시계 — Environment.TickCount 는 24.9일마다 음수로 뒤집혀 시간 계산이 깨진다.
+    static readonly Stopwatch appClock = Stopwatch.StartNew();
+    long uiBeatMs;
 
     const string MUTEX_NAME = "SecureGateSyncUI_SingleInstance";
     const string EVENT_NAME = "SecureGateSyncUI_ShowWindow";
@@ -79,6 +81,18 @@ public class SyncUI : Form {
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+
+        // 로그온 자동시작(/tray)일 때는 탐색기(작업표시줄)가 준비된 뒤에 창을 만든다.
+        // 창 생성(CreateWindowEx)은 셸에 알림을 보내므로, 로그온 직후 셸이 바쁘면
+        // 창을 만드는 도중에 UI 스레드가 붙잡혀 앱이 통째로 멈춘다(실제 장애 원인).
+        if (startTray) {
+            for (int i = 0; i < 180; i++) {
+                if (FindWindowW("Shell_TrayWnd", null) != IntPtr.Zero) break;
+                Thread.Sleep(500);
+            }
+            Thread.Sleep(3000);
+        }
+
         Application.Run(new SyncUI(startTray));
         GC.KeepAlive(_mutex);
     }
@@ -89,13 +103,15 @@ public class SyncUI : Form {
         cfgPath = Path.Combine(dir, "ui.config");
         logPath = Path.Combine(dir, "ui.log");
         LoadConfig();
+        // 워치독을 '가장 먼저' 띄운다. UI 구성이나 창 생성 도중에 멈추는 경우가 실제로 있었는데,
+        // 워치독이 그 뒤에 시작되면 아예 존재하지 않아 복구가 불가능했다.
+        StartWatchdog();
         BuildUi();
         StartTrayThread();
         StartShowListener();
         StartUpdateChecker();
         StartFolderWatch();
         StartDownloadWatch();
-        StartWatchdog();
         if (!string.IsNullOrEmpty(token)) {
             txtSabeon.Text = sabeon;
             SetEnrolledUi(true);            // 이미 등록됨 → 사번/PIN 잠그고 버튼 "재발급"
@@ -208,7 +224,7 @@ public class SyncUI : Form {
 
         // UI 생존 하트비트(워치독이 읽음). 크로스스레드 호출 없이 UI 스레드가 스스로 갱신.
         beatTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-        beatTimer.Tick += (s, e) => { uiHeartbeat++; uiBeatTick = Environment.TickCount; };
+        beatTimer.Tick += (s, e) => { uiHeartbeat++; Interlocked.Exchange(ref uiBeatMs, appClock.ElapsedMilliseconds); };
         beatTimer.Start();
 
         // 최소화(_)는 기본 동작 유지 → 작업표시줄에 남음. 닫기(X)만 트레이로 보냄.
@@ -346,20 +362,34 @@ public class SyncUI : Form {
     void StartWatchdog() {
         var t = new Thread(() => {
             int miss = 0, exitWait = 0;
-            int lastTick = Environment.TickCount;
+            // 시스템 TickCount 는 24.9일마다 뒤집히므로 단조 증가하는 Stopwatch 로 시간을 잰다.
+            long startMs = appClock.ElapsedMilliseconds;
+            long lastMs = startMs;
             // running 이 false 여도 계속 돈다 — '종료 요청했는데 안 죽는' 상황까지 책임진다.
             while (true) {
                 Thread.Sleep(15000);
-                int now = Environment.TickCount;
-                bool resumed = (now - lastTick) > 60000;   // 절전/최대절전 복귀 → 오탐 방지
-                lastTick = now;
+                long nowMs = appClock.ElapsedMilliseconds;
+                bool resumed = (nowMs - lastMs) > 60000;   // 절전/최대절전 복귀 → 오탐 방지
+                lastMs = nowMs;
 
                 if (exitRequested) {                        // 종료를 눌렀는데 프로세스가 안 죽는 경우
                     if (++exitWait >= 2) { Log("종료가 지연됨 — 강제 종료합니다"); HardKill(); }
                     continue;
                 }
                 if (!running) continue;
-                if (resumed || updateBusy || beatTimer == null || !IsHandleCreated) { miss = 0; continue; }
+                if (resumed || updateBusy) { miss = 0; continue; }
+
+                // UI 초기화(창 핸들 생성)가 끝났는지. 창을 만드는 도중 셸에 붙잡히면
+                // 여기가 계속 false 인데, 예전엔 그럴 때 그냥 skip 해서 워치독이 영구히 무력화됐다.
+                // → 기동 후 90초가 지나도 준비가 안 되면 그 자체를 '행'으로 판정한다.
+                bool uiReady = (beatTimer != null && IsHandleCreated);
+                if (!uiReady) {
+                    if (nowMs - startMs < 90000) { miss = 0; continue; }   // 정상 기동 여유
+                    miss++;
+                    Log("경고: UI 초기화가 끝나지 않음 " + miss + "회 (창 생성 단계에서 멈춘 것으로 보임)");
+                    if (miss >= 3) { Log("UI 행(hang) 감지 — 앱을 자동 재시작합니다"); RestartSelf(); }
+                    continue;
+                }
 
                 // 트레이 스레드가 죽었으면(셸 이상 등) 아이콘이 사라진 상태 → 다시 만든다
                 if (trayThread != null && !trayThread.IsAlive) {
@@ -368,7 +398,7 @@ public class SyncUI : Form {
                     try { StartTrayThread(); } catch { }
                 }
 
-                int idle = now - uiBeatTick;               // 마지막 하트비트 이후 경과(ms)
+                long idle = nowMs - Interlocked.Read(ref uiBeatMs);              // 마지막 하트비트 이후 경과(ms)
                 if (idle < 12000) { miss = 0; continue; }
                 miss++;
                 Log("경고: UI 무응답 " + miss + "회 (" + (idle / 1000) + "초째)");
