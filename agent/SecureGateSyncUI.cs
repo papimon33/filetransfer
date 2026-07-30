@@ -85,16 +85,31 @@ public class SyncUI : Form {
         // 로그온 자동시작(/tray)일 때는 탐색기(작업표시줄)가 준비된 뒤에 창을 만든다.
         // 창 생성(CreateWindowEx)은 셸에 알림을 보내므로, 로그온 직후 셸이 바쁘면
         // 창을 만드는 도중에 UI 스레드가 붙잡혀 앱이 통째로 멈춘다(실제 장애 원인).
-        if (startTray) {
-            for (int i = 0; i < 180; i++) {
-                if (FindWindowW("Shell_TrayWnd", null) != IntPtr.Zero) break;
-                Thread.Sleep(500);
-            }
-            Thread.Sleep(3000);
-        }
+        if (startTray) WaitForShellReady();
 
         Application.Run(new SyncUI(startTray));
         GC.KeepAlive(_mutex);
+    }
+
+    /// 셸(탐색기)이 '실제로 응답'할 때까지 기다린다.
+    /// 창을 만들거나 트레이에 등록하는 동작은 셸에 동기 메시지를 보내므로,
+    /// 탐색기가 막 시작해 초기화 중이면 그 호출에서 앱이 통째로 멈춘다.
+    /// (실측: 탐색기 시작 30초 뒤에 앱이 뜨면서 창 생성 단계에서 정지)
+    static void WaitForShellReady() {
+        IntPtr tray = IntPtr.Zero;
+        for (int i = 0; i < 240 && tray == IntPtr.Zero; i++) {      // 작업표시줄이 생길 때까지(최대 2분)
+            tray = FindWindowW("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero) Thread.Sleep(500);
+        }
+        if (tray != IntPtr.Zero) {
+            for (int i = 0; i < 120; i++) {                          // 응답할 때까지(최대 1분)
+                IntPtr res;
+                if (SendMessageTimeout(tray, 0 /*WM_NULL*/, IntPtr.Zero, IntPtr.Zero,
+                                       SMTO_ABORTIFHUNG, 1000, out res) != IntPtr.Zero) break;
+                Thread.Sleep(500);
+            }
+        }
+        Thread.Sleep(5000);                                          // 셸 확장 로딩까지 여유
     }
 
     public SyncUI(bool startTray) {
