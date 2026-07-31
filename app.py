@@ -852,6 +852,34 @@ def agent_source():
         raise HTTPException(status_code=404, detail="Not found")
     return Response(content=AGENT_CS_PATH.read_bytes(), media_type="text/plain; charset=utf-8")
 
+def _client_ip(request: Request) -> str:
+    """Render 프록시 뒤이므로 실제 클라이언트 IP 는 X-Forwarded-For 의 '맨 앞'.
+    (형식: '실제클라이언트, 프록시1, 프록시2' — 맨 앞이 최초 발신자)"""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    xri = request.headers.get("x-real-ip", "")
+    if xri:
+        return xri.strip()
+    return request.client.host if request.client else "?"
+
+@app.get("/whoami")
+def whoami(request: Request):
+    """IP 제한을 걸기 전에 'Render 가 실제로 보는 우리 회사 IP' 를 확인하는 용도.
+    반드시 제한하려는 그 PC(사무실 브라우저)에서 이 주소를 열어볼 것."""
+    return {
+        "your_ip": _client_ip(request),                       # ← 허용목록에 넣을 값
+        "x_forwarded_for": request.headers.get("x-forwarded-for", ""),
+        "x_real_ip": request.headers.get("x-real-ip", ""),
+        "time": now_iso(),
+        "hint": "이 값(your_ip)이 며칠간·여러 시간대에 동일한지 확인 후 ALLOWED_IPS 에 넣으세요.",
+    }
+
+@app.get("/whoami.txt", response_class=PlainTextResponse)
+def whoami_txt(request: Request):
+    """브라우저에서 보기 쉽게 IP 만 한 줄로."""
+    return _client_ip(request)
+
 @app.get("/admin/installer")
 def admin_installer(request: Request, token: str = ""):
     """개인별 설치 .ps1 다운로드. 관리 콘솔의 '설치파일' 버튼이 호출(로그인 필요)."""
