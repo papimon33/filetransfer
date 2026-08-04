@@ -1171,6 +1171,13 @@ def render_desktop_download_page(token: str, info: dict) -> str:
   <div class="hint" id="autoStatus" style="margin-top:4px"></div>
 </div>
 
+<div class="card" id="dropzone" style="border-style:dashed; text-align:center; padding:22px">
+  <div style="font-size:1.05rem"><b>⬆️ 여기에 파일을 끌어다 놓으면 올라갑니다</b></div>
+  <div class="hint" style="margin-top:6px">또는 <button id="pick" class="ghost" type="button" style="padding:6px 12px">파일 선택</button> — 여러 개 가능</div>
+  <div id="upStatus" style="margin-top:10px; font-size:.9rem"></div>
+  <input id="upfile" type="file" multiple hidden>
+</div>
+
 <div class="card">
   <div class="row" style="justify-content:space-between">
     <strong>내 파일 (<span id="cnt">{len(files)}</span>)</strong>
@@ -1291,6 +1298,44 @@ $('#dlall').onclick = async () => {{
 $('#qrbtn').onclick = () => $('#qrmodal').classList.add('open');
 $('#qrclose').onclick = () => $('#qrmodal').classList.remove('open');
 $('#qrmodal').onclick = e => {{ if (e.target.id === 'qrmodal') $('#qrmodal').classList.remove('open'); }};
+
+// ── PC 드래그&드롭 업로드 ──
+const dz = $('#dropzone'), upStatus = $('#upStatus'), upfile = $('#upfile');
+$('#pick').onclick = () => upfile.click();
+upfile.onchange = e => {{ uploadFiles(e.target.files); e.target.value = ''; }};
+// 브라우저 기본 동작(파일을 새 탭으로 여는 것) 차단 + 드롭존 강조
+['dragenter','dragover'].forEach(ev => document.addEventListener(ev, e => {{
+  e.preventDefault(); dz.style.background = 'var(--blue)'; dz.style.color = '#fff';
+}}));
+['dragleave','drop'].forEach(ev => document.addEventListener(ev, e => {{
+  e.preventDefault();
+  if (ev === 'drop' || !e.relatedTarget) {{ dz.style.background = ''; dz.style.color = ''; }}
+}}));
+document.addEventListener('drop', e => {{
+  e.preventDefault();
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length)
+    uploadFiles(e.dataTransfer.files);
+}});
+
+async function uploadFiles(list) {{
+  const files = [...(list || [])];
+  if (!files.length) return;
+  let ok = 0, fail = 0, errs = [];
+  for (let i = 0; i < files.length; i++) {{
+    const f = files[i];
+    upStatus.innerHTML = '⏳ 업로드 중... (' + (i+1) + '/' + files.length + ') ' + f.name.replace(/</g,'&lt;');
+    try {{
+      const fd = new FormData(); fd.append('files', f, f.name);
+      const r = await fetch('/u/' + token + '/upload', {{ method: 'POST', body: fd }});
+      const j = await r.json();
+      if (j.uploaded >= 1) ok++;
+      else {{ fail++; if (j.errors && j.errors[0]) errs.push(j.errors[0]); }}
+    }} catch (e) {{ fail++; errs.push(f.name + ': ' + e); }}
+  }}
+  let h = '<span class="ok">✅ ' + ok + '개 업로드 완료</span>';
+  if (fail) h += ' <span class="err">실패 ' + fail + (errs.length ? ' (' + errs[0].replace(/</g,'&lt;') + ')' : '') + '</span>';
+  upStatus.innerHTML = h;
+}}
 </script>
 </body></html>"""
 
