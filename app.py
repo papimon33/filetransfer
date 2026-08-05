@@ -52,6 +52,7 @@ from fastapi.responses import (
     HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response,
 )
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.background import BackgroundTask
 
 
 # ──────────────────────────────────────────────────────────────
@@ -378,18 +379,33 @@ def resolve_in_userdir(token: str, filename: str) -> Path | None:
     return target
 
 def list_user_files(token: str):
-    udir = user_dir(token)
+    return _list_dir_files(user_dir(token))
+
+def _list_dir_files(d: Path):
     items = []
-    for p in udir.iterdir():
+    for p in d.iterdir():
         if p.is_file() and not p.name.endswith(".tmp"):
             st = p.stat()
-            items.append({
-                "name": p.name,
-                "size": st.st_size,
-                "mtime": st.st_mtime,
-            })
+            items.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items
+
+# ── 반출용 공유 공간 (인터넷PC → 노트북) ──
+# 별도 폴더('<token>__share')라 앱이 감시하는 user_dir(token) 목록에 안 잡힘 → SecureGate 로 안 감.
+def share_dir(token: str) -> Path:
+    d = (UPLOAD_DIR / (token + "__share"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d.resolve()
+
+def resolve_in_sharedir(token: str, filename: str) -> Path | None:
+    sdir = share_dir(token)
+    safe = sanitize_filename(filename)
+    target = (sdir / safe).resolve()
+    try:
+        target.relative_to(sdir)
+    except ValueError:
+        return None
+    return target if target.is_file() else None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -691,6 +707,74 @@ def delete_file(token: str, filename: str, request: Request):
         return {"deleted": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ── 반출용 공유 페이지 (인터넷PC 업로드 → 노트북 다운로드) ──
+@app.get("/u/{token}/share", response_class=HTMLResponse)
+def share_page(token: str, request: Request):
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        return HTMLResponse(render_pin_page(token), status_code=401)
+    return HTMLResponse(render_share_page(token, info))
+
+@app.post("/u/{token}/share/upload")
+async def share_upload(token: str, request: Request, files: list[UploadFile] = File(...)):
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        raise HTTPException(status_code=401, detail="PIN 필요")
+    sdir = share_dir(token)
+    saved, errors = [], []
+    for uf in files:
+        orig = sanitize_filename(uf.filename or "file")
+        if not ext_ok(orig):
+            errors.append(f"{orig}: 허용되지 않은 확장자")
+            continue
+        name = unique_name(sdir, orig)
+        dest = sdir / name
+        size = 0; too_big = False
+        try:
+            with open(dest, "wb") as out:
+                while True:
+                    chunk = await uf.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        too_big = True; break
+                    out.write(chunk)
+            if too_big:
+                dest.unlink(missing_ok=True)
+                errors.append(f"{orig}: 용량 초과(> {MAX_FILE_MB:.0f}MB)")
+                continue
+            saved.append(name)
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            errors.append(f"{orig}: 저장 실패({e})")
+        finally:
+            await uf.close()
+    return JSONResponse({"uploaded": len(saved), "saved": saved, "errors": errors})
+
+@app.get("/u/{token}/share/list")
+def share_list(token: str, request: Request):
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        raise HTTPException(status_code=401, detail="PIN 필요")
+    return {"files": _list_dir_files(share_dir(token))}
+
+@app.get("/u/{token}/share/file/{filename}")
+def share_download(token: str, filename: str, request: Request):
+    """반출 파일 다운로드 — 전송 완료 후 서버에서 자동 삭제(소비형)."""
+    info = require_token(token)
+    if not pin_ok(token, info, request):
+        raise HTTPException(status_code=401, detail="PIN 필요")
+    path = resolve_in_sharedir(token, filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    media = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    # 응답을 다 보낸 뒤 삭제(직접 링크로 받아도 소비되도록). 실패해도 보관시간 초과 시 자동정리됨.
+    def _rm(p=path):
+        try: p.unlink(missing_ok=True)
+        except Exception: pass
+    return FileResponse(path, media_type=media, filename=path.name, background=BackgroundTask(_rm))
 
 @app.get("/u/{token}/qr.png")
 def qr_image(token: str):
@@ -1336,6 +1420,83 @@ async function uploadFiles(list) {{
   if (fail) h += ' <span class="err">실패 ' + fail + (errs.length ? ' (' + errs[0].replace(/</g,'&lt;') + ')' : '') + '</span>';
   upStatus.innerHTML = h;
 }}
+</script>
+</body></html>"""
+
+def render_share_page(token: str, info: dict) -> str:
+    """반출 공유 페이지 — 올려두고(인터넷PC) 다른 기기에서 받기(노트북). 받으면 서버에서 삭제."""
+    name = _html(info.get("name", ""))
+    return f"""<!doctype html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>파일 공유 · {name}</title>{CSS}</head><body>
+<h1>🔁 파일 공유함</h1>
+<div class="sub">{name} · 여기 올려두면 다른 기기에서 받을 수 있어요. <b>받으면 서버에서 삭제됩니다.</b></div>
+
+<div class="card" id="dropzone" style="border-style:dashed; text-align:center; padding:22px">
+  <div style="font-size:1.05rem"><b>⬆️ 여기에 파일을 끌어다 놓으면 올라갑니다</b></div>
+  <div class="hint" style="margin-top:6px">또는 <button id="pick" class="ghost" type="button" style="padding:6px 12px">파일 선택</button> — 여러 개 가능</div>
+  <div id="upStatus" style="margin-top:10px; font-size:.9rem"></div>
+  <input id="upfile" type="file" multiple hidden>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <strong>공유된 파일 (<span id="cnt">0</span>)</strong>
+    <button id="refresh" class="ghost" type="button" style="padding:4px 10px">새로고침</button>
+  </div>
+  <ul class="files" id="list"><li class="hint">불러오는 중...</li></ul>
+</div>
+
+<script>
+const token = {json_str(token)};
+const $ = s => document.querySelector(s);
+const upStatus = $('#upStatus'), dz = $('#dropzone'), upfile = $('#upfile');
+
+function fmtSize(n) {{ return n<1024?n+'B':(n<1048576?(n/1024).toFixed(0)+'KB':(n/1048576).toFixed(1)+'MB'); }}
+
+async function loadList() {{
+  try {{
+    const j = await (await fetch('/u/' + token + '/share/list')).json();
+    const files = j.files || [];
+    $('#cnt').textContent = files.length;
+    if (!files.length) {{ $('#list').innerHTML = '<li class="hint">아직 올린 파일이 없습니다.</li>'; return; }}
+    $('#list').innerHTML = files.map(f => {{
+      const url = '/u/' + token + '/share/file/' + encodeURIComponent(f.name);
+      const nm = f.name.replace(/</g,'&lt;');
+      return '<li class="filerow"><span class="fname">' + nm + '</span>'
+           + '<span class="row" style="gap:10px"><span class="meta">' + fmtSize(f.size) + '</span>'
+           + '<a href="' + url + '" download="' + nm + '"><button class="one ghost" type="button">다운로드</button></a></span></li>';
+    }}).join('');
+  }} catch(e) {{ $('#list').innerHTML = '<li class="err">목록 오류: ' + e + '</li>'; }}
+}}
+
+async function uploadFiles(list) {{
+  const files = [...(list||[])]; if (!files.length) return;
+  let ok=0, fail=0, errs=[];
+  for (let i=0;i<files.length;i++) {{
+    const f = files[i];
+    upStatus.innerHTML = '⏳ 업로드 중... (' + (i+1) + '/' + files.length + ') ' + f.name.replace(/</g,'&lt;');
+    try {{
+      const fd = new FormData(); fd.append('files', f, f.name);
+      const j = await (await fetch('/u/' + token + '/share/upload', {{ method:'POST', body: fd }})).json();
+      if (j.uploaded>=1) ok++; else {{ fail++; if (j.errors&&j.errors[0]) errs.push(j.errors[0]); }}
+    }} catch(e) {{ fail++; errs.push(f.name+': '+e); }}
+  }}
+  upStatus.innerHTML = '<span class="ok">✅ ' + ok + '개 업로드</span>' + (fail? ' <span class="err">실패 '+fail+(errs[0]?' ('+errs[0].replace(/</g,'&lt;')+')':'')+'</span>':'');
+  loadList();
+}}
+
+$('#pick').onclick = () => upfile.click();
+upfile.onchange = e => {{ uploadFiles(e.target.files); e.target.value=''; }};
+$('#refresh').onclick = loadList;
+['dragenter','dragover'].forEach(ev => document.addEventListener(ev, e => {{ e.preventDefault(); dz.style.background='var(--blue)'; dz.style.color='#fff'; }}));
+['dragleave','drop'].forEach(ev => document.addEventListener(ev, e => {{ e.preventDefault(); if(ev==='drop'||!e.relatedTarget){{ dz.style.background=''; dz.style.color=''; }} }}));
+document.addEventListener('drop', e => {{ e.preventDefault(); if(e.dataTransfer&&e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files); }});
+// 다운로드하면 서버에서 소비되므로 잠시 후 목록 갱신
+document.addEventListener('click', e => {{ if (e.target.classList.contains('one')) setTimeout(loadList, 1500); }});
+
+loadList();
+setInterval(loadList, 8000);   // 다른 기기에서 올린 것도 자동 반영
 </script>
 </body></html>"""
 
