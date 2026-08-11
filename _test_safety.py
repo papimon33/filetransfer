@@ -20,9 +20,11 @@ def check(name, cond):
     print(("PASS" if cond else "FAIL"), name)
 
 print("=== 1) 위험 확장자 차단 ===")
+# py/sql 은 개발 소스 이동을 위해 의도적으로 허용(자동 실행되지 않는 텍스트 파일).
+# 자동 실행/등록되는 형식은 계속 차단.
 DANGEROUS = ["a.exe", "a.ps1", "a.bat", "a.cmd", "a.vbs", "a.js", "a.jse", "a.wsf",
              "a.scr", "a.dll", "a.msi", "a.lnk", "a.reg", "a.hta", "a.jar",
-             "a.com", "a.pif", "a.cpl", "a.docm", "a.xlsm", "a.pptm", "a.sh", "a.py"]
+             "a.com", "a.pif", "a.cpl", "a.docm", "a.xlsm", "a.pptm", "a.sh"]
 blocked = [f for f in DANGEROUS if not A.ext_ok(f)]
 check(f"위험 확장자 {len(DANGEROUS)}종 전부 차단", len(blocked) == len(DANGEROUS))
 if len(blocked) != len(DANGEROUS):
@@ -34,6 +36,8 @@ check("확장자 없음 차단", not A.ext_ok("malware"))
 check("점만 있음 차단", not A.ext_ok("a."))
 check("공백 우회 'a.exe ' 차단", not A.ext_ok("a.exe "))
 check("정상 파일은 통과(jpg/pdf/hwp)", A.ext_ok("사진.jpg") and A.ext_ok("보고서.pdf") and A.ext_ok("문서.hwp"))
+check("개발 소스 허용(py/sql)", A.ext_ok("app.py") and A.ext_ok("schema.sql"))
+check("py 허용해도 실행형은 여전히 차단", not A.ext_ok("x.pyc") and not A.ext_ok("x.py.exe"))
 
 # 실제 업로드 경로에서도 차단되는지 (allowlist 실집행)
 with TestClient(A.app) as c:

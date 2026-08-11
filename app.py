@@ -123,7 +123,8 @@ ALLOWED_EXT     = set(
     e.strip().lower().lstrip(".")
     for e in _env("ALLOWED_EXT",
                   "jpg,jpeg,png,heic,heif,webp,gif,bmp,tif,tiff,"          # 이미지
-                  "pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip"    # 문서/압축
+                  "pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip,"   # 문서/압축
+                  "py,sql"                                                 # 개발 소스(요청)
                   ).split(",")
     if e.strip()
 )
