@@ -32,7 +32,7 @@ public class SyncUI : Form {
     readonly List<Form> toasts = new List<Form>();
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
     bool autoSend = false;
-    int autoSendStableSec = 3;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량 등록 대기)
+    int autoSendStableSec = 1;      // 목록 건수가 이 시간만큼 변화 없어야 클릭(대용량이면 계속 늘어나므로 안전)
     int autoSendTimeoutSec = 900;   // 대용량 감안한 최대 대기
 
     TextBox txtSabeon, txtPin, txtLog;
@@ -184,7 +184,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 562);
+        ClientSize = new Size(420, 582);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -229,7 +229,17 @@ public class SyncUI : Form {
 
         txtLog = new TextBox { Location = new Point(14, 440), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
-        Controls.AddRange(new Control[] { l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
+        // 하단 버전 표시 — exe 빌드시각 + 소스 해시 앞자리(지원 문의 시 버전 특정용)
+        string verText;
+        try {
+            verText = "버전 " + File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm");
+            if (!string.IsNullOrEmpty(srcSha) && srcSha.Length >= 8) verText += "  ·  " + srcSha.Substring(0, 8);
+        } catch { verText = ""; }
+        var lblVer = new Label { Text = verText, Location = new Point(14, 550), Size = new Size(392, 18),
+                                 ForeColor = Color.Silver, Font = new Font("Malgun Gothic", 8F),
+                                 TextAlign = ContentAlignment.MiddleRight };
+
+        Controls.AddRange(new Control[] { lblVer, l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
                                           picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkAsk,
                                           lblUpdate, btnUpdate, txtLog });
 
@@ -733,7 +743,7 @@ public class SyncUI : Form {
                 IntPtr win = IntPtr.Zero;
                 while (DateTime.Now < deadline && win == IntPtr.Zero) {
                     win = FindTransferWindow();
-                    if (win == IntPtr.Zero) Thread.Sleep(1000);
+                    if (win == IntPtr.Zero) Thread.Sleep(250);
                 }
                 if (win == IntPtr.Zero) { Log("자동보내기: 자료전송 창을 찾지 못함 → 직접 눌러주세요"); return; }
 
@@ -745,7 +755,7 @@ public class SyncUI : Form {
                 int last = -1; DateTime stableSince = DateTime.Now;
                 while (DateTime.Now < deadline) {
                     int cnt = SendMsgTimed(lv, LVM_GETITEMCOUNT, 5000, -1);
-                    if (cnt < 0) { Thread.Sleep(500); continue; }   // 응답 없음 → 다음 회차 재시도
+                    if (cnt < 0) { Thread.Sleep(250); continue; }   // 응답 없음 → 다음 회차 재시도
                     if (cnt != last) {                       // 아직 등록 중(대용량이면 오래 걸림)
                         last = cnt; stableSince = DateTime.Now;
                         Log("자동보내기: 목록 " + cnt + "건 등록중...");
@@ -767,7 +777,7 @@ public class SyncUI : Form {
                             Notify("자료전송 요청함 (" + cnt + "건)", fileNames + "\n자료전송 창을 확인하세요.");
                         return;
                     }
-                    Thread.Sleep(500);
+                    Thread.Sleep(250);
                 }
                 Log("자동보내기: 대기 시간 초과(" + autoSendTimeoutSec + "초) → 직접 눌러주세요");
             } catch (Exception e) { Log("자동보내기 오류: " + e.Message + " → 직접 눌러주세요"); }
@@ -803,7 +813,19 @@ public class SyncUI : Form {
                             long len;
                             try { len = new FileInfo(f).Length; } catch { continue; }
                             long prev;
-                            if (!sizes.TryGetValue(f, out prev) || prev != len) { sizes[f] = len; continue; }
+                            bool firstSeen = !sizes.TryGetValue(f, out prev);
+                            if (firstSeen) {
+                                // 드래그로 넣은 작은 파일은 이미 복사가 끝나 있다.
+                                // 짧게 재확인해서 크기가 그대로면 다음 회차를 기다리지 않고 바로 투입.
+                                sizes[f] = len;
+                                Thread.Sleep(150);
+                                long len2; try { len2 = new FileInfo(f).Length; } catch { continue; }
+                                if (len2 != len) { sizes[f] = len2; continue; }
+                                if (!IsFileReady(f)) continue;
+                                batch.Add(f);
+                                continue;
+                            }
+                            if (prev != len) { sizes[f] = len; continue; }
                             if (!IsFileReady(f)) continue;      // 아직 쓰는 중
                             batch.Add(f);
                         }
@@ -815,7 +837,7 @@ public class SyncUI : Form {
                         }
                     }
                 } catch (Exception e) { Log("폴더 감시 오류: " + e.Message); }
-                Thread.Sleep(1500);
+                Thread.Sleep(400);
             }
         });
         t.IsBackground = true; t.Start();
