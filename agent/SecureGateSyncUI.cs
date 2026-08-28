@@ -196,6 +196,10 @@ public class SyncUI : Form {
 
     // ── 탐색기 우클릭 메뉴 등록/해제 (HKCU — 관리자 권한 불필요) ──
     const string CTX_KEY = @"Software\Classes\*\shell\SecureGateShare";
+    // 레지스트리를 바꿔도 탐색기는 바로 모른다 → '연결 프로그램이 바뀌었다'고 알려 즉시 반영시킨다.
+    [DllImport("shell32.dll")] static extern void SHChangeNotify(int eventId, uint flags, IntPtr a, IntPtr b);
+    const int SHCNE_ASSOCCHANGED = 0x08000000;
+
     static bool CtxMenuInstalled() {
         try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(CTX_KEY)) return k != null; }
         catch { return false; }
@@ -206,6 +210,7 @@ public class SyncUI : Form {
             try {
                 if (!on) {
                     Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(CTX_KEY, false);
+                    try { SHChangeNotify(SHCNE_ASSOCCHANGED, 0, IntPtr.Zero, IntPtr.Zero); } catch { }
                     Log("우클릭 메뉴 제거됨");
                     return;
                 }
@@ -217,6 +222,7 @@ public class SyncUI : Form {
                 using (var k2 = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(CTX_KEY + @"\command")) {
                     k2.SetValue("", "\"" + exe + "\" /share \"%1\"");
                 }
+                try { SHChangeNotify(SHCNE_ASSOCCHANGED, 0, IntPtr.Zero, IntPtr.Zero); } catch { }
                 Log("우클릭 메뉴 등록됨 — 파일 우클릭 → '공유함으로 전송'");
             } catch (Exception e) { Log("우클릭 메뉴 설정 실패: " + e.Message); }
         });
