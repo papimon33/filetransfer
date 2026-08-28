@@ -1,4 +1,4 @@
-<#
+﻿<#
   SecureGate 사진 자동전송 — GUI 앱 설치 (로컬 컴파일)
   · 이 파일 하나로: WinForms GUI 앱을 로컬에서 컴파일 → 바탕화면/시작프로그램 바로가기 생성 → 실행
   · 앱 창에서 사번 입력 → 발급/등록 → QR 확인, 이후 폰 업로드가 자동으로 SecureGate 목록에 얹힘.
@@ -24,6 +24,8 @@ if ($Uninstall) {
     Remove-Item -LiteralPath $desktopLnk, $startupLnk -Force -EA SilentlyContinue
     Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'SecureGateSyncAgent.lnk') -Force -EA SilentlyContinue
     Remove-Item -LiteralPath $InstallDir -Recurse -Force -EA SilentlyContinue
+    # 탐색기 우클릭 메뉴 제거 (경로에 * 가 있어 Remove-Item 대신 .NET API 사용)
+    try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\Classes\*\shell\SecureGateShare', $false) } catch {}
     Write-Host '제거 완료(앱 종료 + 바로가기 삭제 + 폴더 삭제).' -ForegroundColor Green
     return
 }

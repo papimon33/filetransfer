@@ -40,7 +40,7 @@ public class SyncUI : Form {
     Label lblStatus, lblUrl, lblUpdate;
     Button btnUpdate;
     PictureBox picQr;
-    CheckBox chkAuto, chkSend, chkAsk;
+    CheckBox chkAuto, chkSend, chkAsk, chkCtx;
     volatile NotifyIcon tray;
     Thread syncThread;
     volatile bool running = true;
@@ -57,10 +57,21 @@ public class SyncUI : Form {
 
     [STAThread]
     static void Main(string[] args) {
-        bool startTray = false, afterUpdate = false;
+        bool startTray = false, afterUpdate = false, shareMode = false;
+        var sharePaths = new List<string>();
         foreach (var a in args) {
-            if (a == "/tray") startTray = true;
-            if (a == "/updated") afterUpdate = true;
+            if (a == "/tray") { startTray = true; continue; }
+            if (a == "/updated") { afterUpdate = true; continue; }
+            if (a == "/share") { shareMode = true; continue; }
+            if (shareMode) sharePaths.Add(a);
+        }
+        // 탐색기 우클릭 -> '공유함으로 전송'. 짧게 살았다 죽는 별도 프로세스라
+        // 실행 중인 본체(뮤텍스/UI)와 전혀 얽히지 않는다.
+        if (shareMode) {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            RunShareUpload(sharePaths);
+            return;
         }
         bool createdNew;
         _mutex = new Mutex(true, MUTEX_NAME, out createdNew);
@@ -89,6 +100,126 @@ public class SyncUI : Form {
 
         Application.Run(new SyncUI(startTray));
         GC.KeepAlive(_mutex);
+    }
+
+    // ── 탐색기 우클릭 '공유함으로 전송' ──────────────────────────────
+    // ui.config 의 server/token 을 읽어 /u/<token>/share/upload 로 바로 올린다.
+    static void RunShareUpload(List<string> paths) {
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+        string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SecureGateSync");
+        string server = "https://qr-upload-server.onrender.com", token = "";
+        try {
+            foreach (var ln in File.ReadAllLines(Path.Combine(dir, "ui.config"), Encoding.UTF8)) {
+                int i = ln.IndexOf('='); if (i <= 0) continue;
+                string k = ln.Substring(0, i).Trim(), v = ln.Substring(i + 1).Trim();
+                if (k == "server" && v != "") server = v.TrimEnd('/');
+                else if (k == "token") token = v;
+            }
+        } catch { }
+        if (string.IsNullOrEmpty(token)) {
+            MessageBox.Show("사번이 등록되어 있지 않습니다.\n앱을 열어 사번/PIN 으로 먼저 발급·등록하세요.", "공유함으로 전송");
+            return;
+        }
+        if (paths.Count == 0) return;
+
+        int ok = 0, fail = 0; string lastErr = "";
+        foreach (var f in paths) {
+            try {
+                if (!File.Exists(f)) { fail++; lastErr = Path.GetFileName(f) + ": 파일 없음"; continue; }
+                ShareUploadOne(server, token, f);
+                ok++;
+            } catch (Exception e) { fail++; lastErr = Path.GetFileName(f) + ": " + e.Message; }
+        }
+        if (fail == 0)
+            ShowQuickToast("✅ 공유함으로 전송", ok + "개 업로드 완료 — 다른 기기에서 받으세요");
+        else
+            MessageBox.Show("업로드 " + ok + "개 성공, " + fail + "개 실패\n\n" + lastErr, "공유함으로 전송");
+    }
+
+    static void ShareUploadOne(string server, string token, string path) {
+        string boundary = "----SGShare" + Guid.NewGuid().ToString("N");
+        var req = (HttpWebRequest)WebRequest.Create(server + "/u/" + token + "/share/upload");
+        req.Method = "POST";
+        req.ContentType = "multipart/form-data; boundary=" + boundary;
+        req.Timeout = 120000; req.ReadWriteTimeout = 300000;
+        req.AllowWriteStreamBuffering = false;          // 큰 파일도 메모리에 다 올리지 않음
+        string fname = Path.GetFileName(path);
+        byte[] head = Encoding.UTF8.GetBytes(
+            "--" + boundary + "\r\n" +
+            "Content-Disposition: form-data; name=\"files\"; filename=\"" + fname + "\"\r\n" +
+            "Content-Type: application/octet-stream\r\n\r\n");
+        byte[] tail = Encoding.UTF8.GetBytes("\r\n--" + boundary + "--\r\n");
+        req.ContentLength = head.Length + new FileInfo(path).Length + tail.Length;
+        using (var rs = req.GetRequestStream()) {
+            rs.Write(head, 0, head.Length);
+            using (var fs = File.OpenRead(path)) fs.CopyTo(rs);
+            rs.Write(tail, 0, tail.Length);
+        }
+        using (var resp = (HttpWebResponse)req.GetResponse())
+        using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) {
+            var o = new JavaScriptSerializer().DeserializeObject(sr.ReadToEnd()) as Dictionary<string, object>;
+            int up = (o != null && o.ContainsKey("uploaded")) ? Convert.ToInt32(o["uploaded"]) : 0;
+            if (up < 1) {
+                string err = "서버가 거부함";
+                try {
+                    var errs = o["errors"] as object[];
+                    if (errs != null && errs.Length > 0) err = Convert.ToString(errs[0]);
+                } catch { }
+                throw new Exception(err);
+            }
+        }
+    }
+
+    /// 짧게 살았다 죽는 프로세스용 알림 — 우하단에 잠깐 떴다 사라짐
+    static void ShowQuickToast(string title, string text) {
+        try {
+            var f = new ToastForm();
+            f.Size = new Size(330, 78);
+            f.BackColor = Color.FromArgb(31, 41, 55);
+            var l1 = new Label { Text = title, ForeColor = Color.White,
+                                 Font = new Font("Malgun Gothic", 9.5F, FontStyle.Bold),
+                                 Location = new Point(12, 10), Size = new Size(306, 20), AutoEllipsis = true };
+            var l2 = new Label { Text = text, ForeColor = Color.FromArgb(209, 213, 219),
+                                 Font = new Font("Malgun Gothic", 8.5F),
+                                 Location = new Point(12, 34), Size = new Size(306, 34), AutoEllipsis = true };
+            f.Controls.AddRange(new Control[] { l1, l2 });
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            f.Location = new Point(wa.Right - f.Width - 12, wa.Bottom - f.Height - 12);
+            var t = new System.Windows.Forms.Timer { Interval = 2500 };
+            t.Tick += (s, e) => { t.Stop(); f.Close(); };
+            f.Shown += (s, e) => t.Start();
+            EventHandler cl = (s, e) => { t.Stop(); f.Close(); };
+            f.Click += cl; l1.Click += cl; l2.Click += cl;
+            Application.Run(f);
+        } catch { }
+    }
+
+    // ── 탐색기 우클릭 메뉴 등록/해제 (HKCU — 관리자 권한 불필요) ──
+    const string CTX_KEY = @"Software\Classes\*\shell\SecureGateShare";
+    static bool CtxMenuInstalled() {
+        try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(CTX_KEY)) return k != null; }
+        catch { return false; }
+    }
+    void SetCtxMenu(bool on) {
+        // 레지스트리/셸 관련 작업은 UI 스레드 밖에서
+        ThreadPool.QueueUserWorkItem(_ => {
+            try {
+                if (!on) {
+                    Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(CTX_KEY, false);
+                    Log("우클릭 메뉴 제거됨");
+                    return;
+                }
+                string exe = Application.ExecutablePath;
+                using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(CTX_KEY)) {
+                    k.SetValue("", "공유함으로 전송");
+                    k.SetValue("Icon", exe + ",0");
+                }
+                using (var k2 = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(CTX_KEY + @"\command")) {
+                    k2.SetValue("", "\"" + exe + "\" /share \"%1\"");
+                }
+                Log("우클릭 메뉴 등록됨 — 파일 우클릭 → '공유함으로 전송'");
+            } catch (Exception e) { Log("우클릭 메뉴 설정 실패: " + e.Message); }
+        });
     }
 
     /// 셸(탐색기)이 '실제로 응답'할 때까지 기다린다.
@@ -184,7 +315,7 @@ public class SyncUI : Form {
         try { appIcon = MakeAppIcon(); Icon = appIcon; } catch { }
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 582);
+        ClientSize = new Size(420, 604);
         Font = new Font("Malgun Gothic", 9F);
 
         var l1 = new Label { Text = "사번", Location = new Point(14, 18), AutoSize = true };
@@ -222,12 +353,16 @@ public class SyncUI : Form {
         chkAsk.CheckedChanged += (s, e) => { askDownloads = chkAsk.Checked; SaveConfig();
             Log(askDownloads ? "다운로드 감시 켬: " + downloadsDir : "다운로드 감시 끔"); };
 
-        lblUpdate = new Label { Location = new Point(14, 412), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
+        chkCtx = new CheckBox { Text = "탐색기 우클릭 메뉴에 '공유함으로 전송' 추가", Location = new Point(14, 406), AutoSize = true };
+        chkCtx.Checked = CtxMenuInstalled();
+        chkCtx.CheckedChanged += (s, e) => SetCtxMenu(chkCtx.Checked);
+
+        lblUpdate = new Label { Location = new Point(14, 434), Size = new Size(250, 22), ForeColor = Color.OrangeRed,
                                 TextAlign = ContentAlignment.MiddleLeft, Visible = false };
-        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 408), Size = new Size(136, 26), Visible = false };
+        btnUpdate = new Button { Text = "지금 업데이트", Location = new Point(270, 430), Size = new Size(136, 26), Visible = false };
         btnUpdate.Click += (s, e) => ApplyUpdate();
 
-        txtLog = new TextBox { Location = new Point(14, 440), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
+        txtLog = new TextBox { Location = new Point(14, 462), Size = new Size(392, 104), Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, BackColor = Color.White };
 
         // 하단 버전 표시 — exe 빌드시각 + 소스 해시 앞자리(지원 문의 시 버전 특정용)
         string verText;
@@ -235,12 +370,12 @@ public class SyncUI : Form {
             verText = "버전 " + File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm");
             if (!string.IsNullOrEmpty(srcSha) && srcSha.Length >= 8) verText += "  ·  " + srcSha.Substring(0, 8);
         } catch { verText = ""; }
-        var lblVer = new Label { Text = verText, Location = new Point(14, 550), Size = new Size(392, 18),
+        var lblVer = new Label { Text = verText, Location = new Point(14, 572), Size = new Size(392, 18),
                                  ForeColor = Color.Silver, Font = new Font("Malgun Gothic", 8F),
                                  TextAlign = ContentAlignment.MiddleRight };
 
         Controls.AddRange(new Control[] { lblVer, l1, txtSabeon, l2, txtPin, btnEnroll, lblPinHint, lblStatus,
-                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkAsk,
+                                          picQr, lblQrHint, lblUrl, chkAuto, chkSend, chkAsk, chkCtx,
                                           lblUpdate, btnUpdate, txtLog });
 
         // 트레이 아이콘은 '전용 스레드'에서 만든다 → StartTrayThread()
