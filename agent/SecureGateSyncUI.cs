@@ -28,6 +28,9 @@ public class SyncUI : Form {
     readonly HashSet<string> fedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // 다운로드 폴더 감시 → 새 다운로드마다 [자료전송]/[무시] 토스트(기본 ON)
     bool askDownloads = true;
+    // 공유함(반출) 우클릭 메뉴 — 개인 편의 기능이라 배포본에서는 숨긴다.
+    // 쓰려면 ui.config 에 sharemenu=true 를 넣으면 체크박스가 나타난다.
+    bool shareMenu = false;
     string downloadsDir = "";
     readonly List<Form> toasts = new List<Form>();
     // [파일보내기] 자동 클릭 (기본 OFF — 켠 사람만 사용)
@@ -294,6 +297,7 @@ public class SyncUI : Form {
                     // autosend_stable/timeout 은 더 이상 config 에서 읽지 않음(컴파일 기본값 사용 → 업데이트로 개선 전파)
                     else if (k == "srcsha") srcSha = v;
                     else if (k == "askdownloads") askDownloads = (v == "1" || v.ToLower() == "true");
+                    else if (k == "sharemenu") shareMenu = (v == "1" || v.ToLower() == "true");
                 }
         } catch { }
         if (dest == "") dest = "C:\\SecureGateWatch";
@@ -311,6 +315,7 @@ public class SyncUI : Form {
         sb.Append("autosend=").Append(autoSend ? "true" : "false").Append("\r\n");
         sb.Append("srcsha=").Append(srcSha).Append("\r\n");
         sb.Append("askdownloads=").Append(askDownloads ? "true" : "false").Append("\r\n");
+        if (shareMenu) sb.Append("sharemenu=true").Append(Environment.NewLine);
         try { File.WriteAllText(cfgPath, sb.ToString(), new UTF8Encoding(false)); } catch { }
     }
 
@@ -360,6 +365,7 @@ public class SyncUI : Form {
             Log(askDownloads ? "다운로드 감시 켬: " + downloadsDir : "다운로드 감시 끔"); };
 
         chkCtx = new CheckBox { Text = "탐색기 우클릭 메뉴에 '공유함으로 전송' 추가", Location = new Point(14, 406), AutoSize = true };
+        chkCtx.Visible = shareMenu;   // 배포본에서는 보이지 않음
         chkCtx.Checked = CtxMenuInstalled();
         chkCtx.CheckedChanged += (s, e) => SetCtxMenu(chkCtx.Checked);
 
