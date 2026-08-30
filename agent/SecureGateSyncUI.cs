@@ -277,6 +277,8 @@ public class SyncUI : Form {
         } else {
             SetStatus("사번을 입력하고 [발급/등록]을 누르세요.");
         }
+        // 시작 기록 — 앱이 조용히 사라졌을 때 언제 떴다 사라졌는지 추적할 수 있게
+        Log("앱 시작" + (startTray ? " (자동시작)" : "") + " · PID " + Process.GetCurrentProcess().Id);
     }
 
     // ── 설정 ──
@@ -1020,7 +1022,9 @@ public class SyncUI : Form {
                 try {
                     if (askDownloads && Directory.Exists(downloadsDir)) {
                         var cur = Directory.GetFiles(downloadsDir);
-                        if (seen.Count > 5000) {          // 무한 증가 방지: 지금 폴더에 있는 것만 남김
+                        // 폴더에서 없어진 항목은 바로 잊는다.
+                        // (기록을 남겨두면 같은 이름 파일을 다시 넣었을 때 '이미 본 것'으로 오인해 안 물어봄)
+                        {
                             var alive = new HashSet<string>(cur, StringComparer.OrdinalIgnoreCase);
                             seen.RemoveWhere(x => !alive.Contains(x));
                             foreach (var k2 in new List<string>(sizes.Keys)) if (!alive.Contains(k2)) sizes.Remove(k2);
@@ -1050,7 +1054,7 @@ public class SyncUI : Form {
         var f = new ToastForm();
         f.Size = new Size(330, 96);
         f.BackColor = Color.FromArgb(37, 99, 235);
-        var lbl1 = new Label { Text = "새 다운로드 — 자료전송할까요?", ForeColor = Color.White,
+        var lbl1 = new Label { Text = "새 파일 — 자료전송할까요?", ForeColor = Color.White,
                                Font = new Font("Malgun Gothic", 8F), Location = new Point(12, 8), AutoSize = true };
         var lbl2 = new Label { Text = Path.GetFileName(filePath), ForeColor = Color.White,
                                Font = new Font("Malgun Gothic", 9.5F, FontStyle.Bold),
