@@ -1064,7 +1064,9 @@ public class SyncUI : Form {
         var btnNo = new Button { Text = "무시", Location = new Point(254, 56), Size = new Size(64, 30),
                                  FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(37, 99, 235), ForeColor = Color.White };
         btnNo.FlatAppearance.BorderColor = Color.White;
-        var timer = new System.Windows.Forms.Timer { Interval = 10000 };     // 10초 후 자동 무시
+        var timer = new System.Windows.Forms.Timer { Interval = 90000 };     // 90초 후 자동 무시
+        // 이건 '전송할지 말지' 결정을 요구하는 알림이라 금방 사라지면 그냥 놓치게 된다.
+        // (실측: 파일 이동 2.6초 뒤 표시되지만 10초 만에 사라져 못 보는 일이 있었음)
         Action close = () => { try { timer.Stop(); timer.Dispose(); toasts.Remove(f); f.Close(); f.Dispose(); RepositionToasts(); } catch { } };
         btnGo.Click += (s, e) => { close(); TransferDownloaded(filePath); };
         btnNo.Click += (s, e) => close();
