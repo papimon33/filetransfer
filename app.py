@@ -114,7 +114,7 @@ PORT            = int(_env("PORT", "8000"))
 HOST            = _env("HOST", "0.0.0.0")
 BASE_URL_ENV    = (_env("BASE_URL", "") or "").rstrip("/")
 
-MAX_FILE_MB     = float(_env("MAX_FILE_MB", "30"))
+MAX_FILE_MB     = float(_env("MAX_FILE_MB", "40"))
 MAX_FILE_BYTES  = int(MAX_FILE_MB * 1024 * 1024)
 RETENTION_HOURS = float(_env("RETENTION_HOURS", "6"))
 CLEANUP_MIN     = float(_env("CLEANUP_INTERVAL_MIN", "30"))
@@ -124,7 +124,7 @@ ALLOWED_EXT     = set(
     for e in _env("ALLOWED_EXT",
                   "jpg,jpeg,png,heic,heif,webp,gif,bmp,tif,tiff,"          # 이미지
                   "pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip,"   # 문서/압축
-                  "py,sql"                                                 # 개발 소스(요청)
+                  "py,sql,bundle"                                          # 개발 소스 / git 번들(요청)
                   ).split(",")
     if e.strip()
 )

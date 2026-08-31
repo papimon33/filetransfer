@@ -22,13 +22,13 @@ services:
       - key: PRESET_TOKENS             # (선택) 기존 토큰 마이그레이션용 "토큰=이름". Mongo 쓰면 대개 불필요
         sync: false
       - key: MAX_FILE_MB
-        value: "30"
+        value: "40"
       - key: RETENTION_HOURS
         value: "6"
       - key: CLEANUP_INTERVAL_MIN
         value: "30"
       - key: ALLOWED_EXT
-        value: "jpg,jpeg,png,heic,heif,webp,gif,bmp,tif,tiff,pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip,py,sql"
+        value: "jpg,jpeg,png,heic,heif,webp,gif,bmp,tif,tiff,pdf,hwp,hwpx,doc,docx,xls,xlsx,ppt,pptx,txt,csv,zip,py,sql,bundle"
       - key: REQUIRE_PIN
         value: "false"
       - key: ADMIN_PASSWORD            # 관리 콘솔 로그인 비밀번호 — 기억하기 쉬운 값으로 대시보드에서 직접 입력
